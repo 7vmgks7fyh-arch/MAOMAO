@@ -189,10 +189,12 @@ def extract_transparent_sprite(
     return canvas
 
 
-def extract_sit_arms(sit_rgba: Image.Image) -> tuple[Image.Image, Image.Image, Image.Image]:
+def extract_sit_arms(sit_rgba: Image.Image) -> tuple[Image.Image, Image.Image, Image.Image, Image.Image]:
     """
-    基于 sit.png 精准拆件出保留原画笔触与五指的左/右原装手臂（arm_left / arm_right），
-    以及抹除原装双手的干净坐姿底图（typing_body），同时导出高清放大拆件验收图。
+    基于 sit.png 精准拆件：
+    - arm_left / arm_right：保留原画笔触与五指，并在顶部延伸圆润肤色球形关节帽；
+    - sleeves_top：提取原画左右肩袖与白色荷叶边作为顶层遮罩；
+    - typing_body：抹除原装双手并消除袖口白雾污渍，清理左掌外侧多余外凸轮廓。
     """
     rgba = np.array(sit_rgba, dtype=np.uint8)
     rgb = rgba[:, :, :3].copy()
@@ -203,30 +205,54 @@ def extract_sit_arms(sit_rgba: Image.Image) -> tuple[Image.Image, Image.Image, I
     g = rgb[:, :, 1].astype(np.int16)
     b = rgb[:, :, 2].astype(np.int16)
     max_c = np.maximum(np.maximum(r, g), b)
+    min_c = np.minimum(np.minimum(r, g), b)
+    yy, xx = np.mgrid[0:h, 0:w]
 
     skin = (alpha > 120) & (r > 182) & (g > 138) & (b > 125) & ((r - b) > 10)
-    is_purple_hair = (b > 145) & ((b - r) > 22) & (g < 185)
+    is_purple_hair = (alpha > 120) & (b > 145) & ((b - r) > 22) & (g < 185)
     dark_outline_cuff = (alpha > 120) & (max_c < 138)
     gold_trim = (alpha > 120) & (r > 165) & (g > 135) & ((r - b) > 20)
 
-    yy, xx = np.mgrid[0:h, 0:w]
+    # 1. 提取左右原画肩袖 + 白色荷叶边作为顶层遮罩层（sleeves_top）
+    sleeve_polys = [
+        np.array([[120, 236], [128, 223], [145, 226], [150, 259], [142, 268], [128, 265], [116, 258], [114, 248]], dtype=np.int32),
+        np.array([[222, 224], [244, 227], [256, 246], [252, 260], [236, 267], [221, 268], [218, 256]], dtype=np.int32),
+    ]
+    sleeve_poly_mask = np.zeros((h, w), dtype=np.uint8)
+    for poly in sleeve_polys:
+        cv2.fillPoly(sleeve_poly_mask, [poly], 1)
+
+    # 剔除位于袖子最外缘背后的纯紫背景发丝，保留袖子本体与右袖内侧前景小发丝
+    bg_hair_in_sleeve = is_purple_hair & (((xx <= 122) & (yy >= 236)) | ((xx >= 250) & (yy >= 242)))
+    sleeve_fg = ((sleeve_poly_mask == 1) & (~skin) & (~bg_hair_in_sleeve) & (alpha > 30)).astype(np.uint8)
+    # 仅留有效主肩袖轮廓并柔化外缘 alpha，保持主体 100% 实色遮挡手臂根部
+    sleeve_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    sleeve_eroded = cv2.erode(sleeve_fg, sleeve_k, iterations=1)
+    sleeve_alpha_raw = np.where(sleeve_fg == 1, alpha, 0).astype(np.uint8)
+    sleeve_alpha_soft = cv2.GaussianBlur(sleeve_alpha_raw, (3, 3), 0.5)
+    sleeve_alpha = np.where(sleeve_eroded == 1, sleeve_alpha_raw, np.where(sleeve_fg == 0, 0, sleeve_alpha_soft))
+    sleeves_top = Image.fromarray(np.dstack([rgb, sleeve_alpha.astype(np.uint8)]), mode="RGBA")
+
     arm_layers: list[Image.Image] = []
     combined_erase = np.zeros((h, w), dtype=np.uint8)
+    left_erase_mask = np.zeros((h, w), dtype=np.uint8)
 
+    # 左右手臂 ROI 与实测真实肩关节枢轴
     rois = [
-        ("left", 92, 154, 250, 303),
-        ("right", 222, 274, 250, 303),
+        ("left", 92, 152, 250, 303, (132, 263), (129, 270)),
+        ("right", 222, 274, 250, 303, (234, 264), (236, 271)),
     ]
     close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     dil_erase_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    dil_arm_edge_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
-    for side, x0, x1, y0, y1 in rois:
+    for side, x0, x1, y0, y1, pivot_pt, default_conn in rois:
         roi_mask = (xx >= x0) & (xx < x1) & (yy >= y0) & (yy < y1)
-        # 精确切掉紧邻手臂内下侧的裙摆金边三角形区域
+        # 精确切掉紧邻手臂内下侧的裙摆金边及腋下暗角区域
         if side == "left":
-            roi_mask &= ~((xx >= 141) & (yy >= 275))
-            roi_mask &= ~((xx >= 136) & (yy >= 282))
-            roi_mask &= ~((xx >= 132) & (yy >= 289))
+            roi_mask &= ~((xx >= 135) & (yy >= 270))
+            roi_mask &= ~((xx >= 131) & (yy >= 278))
+            roi_mask &= ~((xx >= 129) & (yy >= 285))
         else:
             roi_mask &= ~((xx <= 233) & (yy >= 282))
             roi_mask &= ~((xx <= 240) & (yy >= 292))
@@ -235,17 +261,20 @@ def extract_sit_arms(sit_rgba: Image.Image) -> tuple[Image.Image, Image.Image, I
 
         # 到肤色的欧氏距离：紧锁护腕本体与外描边，彻底隔离裙摆与头发外线
         dist_to_skin = cv2.distanceTransform(1 - skin_roi, cv2.DIST_L2, 5)
+        # 顶部袖口接缝处（yy <= 270）不吸收白荷叶边的横向黑描边，避免在球形关节中间留下黑横线
+        allow_dark_outline = dark_outline_cuff & (dist_to_skin <= 4.4) & (yy >= 271)
         arm_cand = (
             roi_mask
             & (~is_purple_hair)
             & (
                 skin
-                | (dark_outline_cuff & (dist_to_skin <= 6.2))
-                | (gold_trim & (dist_to_skin <= 3.8))
+                | allow_dark_outline
+                | (gold_trim & (dist_to_skin <= 3.4) & (yy >= 271))
             )
         ).astype(np.uint8)
-        # 上臂柔和截断在白荷叶边袖口下，且上沿仅保留贴紧肤色部分，不吃入上方发饰深蓝边
-        arm_cand[(yy <= 255) | ((yy <= 261) & (dist_to_skin > 3.2))] = 0
+        # 上臂柔和截断在白荷叶边袖口下，不吃入上方荷叶边及紫发；且顶部只留高饱和纯肤色
+        arm_cand[(yy <= 261) | ((yy <= 270) & (skin_roi == 0))] = 0
+        arm_cand[(yy <= 269) & ((r < 225) | (g < 180))] = 0
         arm_cand[alpha <= 30] = 0
 
         # 轻微闭运算填充金边接缝，并清理孤立 1px 细毛丝
@@ -273,39 +302,96 @@ def extract_sit_arms(sit_rgba: Image.Image) -> tuple[Image.Image, Image.Image, I
         eroded = cv2.erode(arm_fg, close_k, iterations=1)
         soft_a = cv2.GaussianBlur(arm_alpha, (3, 3), 0.55)
         final_a = np.where(eroded == 1, arm_alpha, np.where(arm_fg == 0, 0, soft_a))
+        # 上沿 262..270 渐强融合，确保与上方球节皮肤零折痕顺滑衔接
+        top_feather = np.clip((yy.astype(np.float32) - 262.0) / 7.0, 0.0, 1.0)
+        final_a = np.where(yy < 270, (final_a.astype(np.float32) * top_feather).astype(np.uint8), final_a)
+        raw_arm_img = Image.fromarray(np.dstack([rgb, final_a.astype(np.uint8)]), mode="RGBA")
 
-        arm_rgba = np.dstack([rgb, final_a])
-        arm_layers.append(Image.fromarray(arm_rgba, mode="RGBA"))
+        # 2. 顶部补全圆润肤色球形关节延伸帽（隐藏在袖口内，避免旋转露平切口）
+        upper_skin = (skin_roi == 1) & (yy <= 278)
+        if np.any(upper_skin):
+            skin_pixels = rgb[upper_skin]
+            skin_fill = np.median(skin_pixels, axis=0).astype(np.float32)
+            uy, ux = np.where(upper_skin & (yy <= 273))
+            if len(ux) > 0:
+                conn_pt = (int(round(float(np.mean(ux)))), int(round(float(np.mean(uy)))))
+            else:
+                conn_pt = default_conn
+        else:
+            skin_fill = np.array([255, 224, 214], dtype=np.float32)
+            conn_pt = default_conn
+        skin_shadow = np.clip(skin_fill * np.array([0.93, 0.85, 0.87], dtype=np.float32), 0, 255)
 
-        # typing_body 的擦除区域保持原有全袖手覆盖，保证底图抹手干净
-        erase_roi = (xx >= x0) & (xx < x1) & (yy >= y0) & (yy < y1)
+        cap_outline = np.zeros((h, w), dtype=np.uint8)
+        cap_inner = np.zeros((h, w), dtype=np.uint8)
+        radius = 9
+        cv2.line(cap_outline, pivot_pt, conn_pt, 255, thickness=(radius + 2) * 2, lineType=cv2.LINE_AA)
+        cv2.line(cap_inner, pivot_pt, conn_pt, 255, thickness=radius * 2, lineType=cv2.LINE_AA)
+
+        cap_rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        outline_col = np.array([42, 40, 86], dtype=np.float32)
+        inner_t = (cap_inner.astype(np.float32) / 255.0)[:, :, None]
+        grad_t = np.clip((yy - (pivot_pt[1] - radius)) / max(1.0, float(conn_pt[1] - pivot_pt[1] + radius)), 0.0, 1.0)[:, :, None]
+        fill_rgb = skin_shadow[None, None, :] * (1.0 - grad_t) + skin_fill[None, None, :] * grad_t
+        cap_rgb = outline_col[None, None, :] * (1.0 - inner_t) + fill_rgb * inner_t
+        cap_rgba[:, :, :3] = np.clip(cap_rgb, 0, 255).astype(np.uint8)
+        cap_rgba[:, :, 3] = np.maximum(cap_outline, cap_inner)
+
+        # 将原装高保真手臂像素盖在胶囊之上；且用柔和淡入避免顶部交界露白/黑细线
+        cap_img = Image.fromarray(cap_rgba, mode="RGBA")
+        cap_img.alpha_composite(raw_arm_img)
+        arm_layers.append(cap_img)
+
+        # typing_body 抹手掩码：涵盖整个护腕外缘 2px 与上臂肤色（不在 sleeve_fg 内侵蚀）
+        erase_roi = (xx >= x0) & (xx < x1) & (yy >= 260) & (yy < y1) & (sleeve_fg == 0)
         skin_erase = (skin & erase_roi).astype(np.uint8)
-        erase_side = cv2.dilate(skin_erase, dil_erase_k, iterations=1) | arm_fg
+        arm_dil = cv2.dilate(arm_fg, dil_arm_edge_k, iterations=1)
+        erase_side = (cv2.dilate(skin_erase, dil_erase_k, iterations=1) | arm_dil)
         erase_side[~erase_roi] = 0
         combined_erase |= erase_side
+        if side == "left":
+            left_erase_mask = erase_side.copy()
 
     erase_mask = (combined_erase * 255).astype(np.uint8)
     erase_mask[alpha <= 30] = 0
+    erase_mask[sleeve_fg == 1] = 0
+
+    # 3. 防白雾与黑影渗色修复：inpaint 前临时掩蔽上方亮白荷叶边及护腕深黑邻边
     rgb_for_inpaint = rgb.copy()
-    rgb_for_inpaint[alpha <= 30] = (122, 122, 222)
+    bright_white = (yy < 274) & (min_c > 175)
+    rgb_for_inpaint[alpha <= 30] = (120, 120, 214)
+    rgb_for_inpaint[(sleeve_fg == 1) | bright_white] = (118, 120, 212)
+
     bgr = cv2.cvtColor(rgb_for_inpaint, cv2.COLOR_RGB2BGR)
-    inpainted_bgr = cv2.inpaint(bgr, erase_mask, inpaintRadius=7, flags=cv2.INPAINT_TELEA)
+    inpainted_bgr = cv2.inpaint(bgr, erase_mask, inpaintRadius=6, flags=cv2.INPAINT_TELEA)
     inpainted_rgb = cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
     body_rgb = np.where(erase_mask[:, :, None] > 0, inpainted_rgb, rgb)
-    typing_body = Image.fromarray(np.dstack([body_rgb, alpha]), mode="RGBA")
 
-    return arm_layers[0], arm_layers[1], typing_body
+    # 4. 清理左手掌外侧凸出左发外轮廓的残余外凸像素，保持左发轮廓顺滑自然
+    body_alpha = alpha.copy()
+    left_hair = ((is_purple_hair | (dark_outline_cuff & (xx >= 102) & (xx <= 122))) & (xx >= 100) & (xx <= 135) & (yy >= 255) & (yy <= 315)).astype(np.uint8)
+    dist_to_left_hair = cv2.distanceTransform(1 - left_hair, cv2.DIST_L2, 5)
+    protrude_left = (xx <= 114) & (yy >= 274) & (yy <= 303) & (left_erase_mask == 1) & (dist_to_left_hair > 2.4)
+    body_alpha[protrude_left] = 0
+    # 边界 1px 抗锯齿
+    protrude_edge = (cv2.dilate(protrude_left.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0) & (~protrude_left) & (body_alpha > 0) & (xx <= 115) & (yy >= 273) & (yy <= 304)
+    body_alpha[protrude_edge] = (body_alpha[protrude_edge].astype(np.float32) * 0.72).astype(np.uint8)
+
+    typing_body = Image.fromarray(np.dstack([body_rgb, body_alpha]), mode="RGBA")
+
+    return arm_layers[0], arm_layers[1], sleeves_top, typing_body
 
 
 def save_arms_cutout_check(
     arm_left: Image.Image,
     arm_right: Image.Image,
+    sleeves_top: Image.Image,
     typing_body: Image.Image,
     out_path: str,
 ):
-    """生成左右原装手臂放大特写 + 去手底图的棋盘格验收图。"""
+    """生成左右手臂（含圆头球节）、顶层袖口遮罩及去手底图肩袖特写的高清棋盘格验收图。"""
     cell = 260
-    w, h = cell * 3, cell
+    w, h = cell * 4, cell
     bg = np.zeros((h, w, 3), dtype=np.uint8)
     tile = 14
     for y in range(0, h, tile):
@@ -314,14 +400,15 @@ def save_arms_cutout_check(
             bg[y : y + tile, x : x + tile] = c
     canvas = Image.fromarray(bg, mode="RGB").convert("RGBA")
 
-    # 左臂局部特写 (x:80..170, y:235..325 -> 90x90 放大到 260x260)
     l_crop = arm_left.crop((80, 235, 170, 325)).resize((cell, cell), Image.Resampling.NEAREST)
     r_crop = arm_right.crop((208, 235, 298, 325)).resize((cell, cell), Image.Resampling.NEAREST)
-    b_crop = typing_body.resize((cell, cell), Image.Resampling.LANCZOS)
+    s_crop = sleeves_top.crop((96, 200, 276, 310)).resize((cell, cell), Image.Resampling.NEAREST)
+    b_crop = typing_body.crop((86, 210, 286, 330)).resize((cell, cell), Image.Resampling.LANCZOS)
 
     canvas.alpha_composite(l_crop, (0, 0))
     canvas.alpha_composite(r_crop, (cell, 0))
-    canvas.alpha_composite(b_crop, (cell * 2, 0))
+    canvas.alpha_composite(s_crop, (cell * 2, 0))
+    canvas.alpha_composite(b_crop, (cell * 3, 0))
     canvas.convert("RGB").save(out_path)
 
 
@@ -382,17 +469,18 @@ def main():
         print(f"Prepared sprite: {out_png}")
 
     if "sit" in sprites:
-        arm_left, arm_right, typing_body = extract_sit_arms(sprites["sit"])
+        arm_left, arm_right, sleeves_top, typing_body = extract_sit_arms(sprites["sit"])
         for arm_name, arm_img in (
             ("arm_left", arm_left),
             ("arm_right", arm_right),
+            ("sleeves_top", sleeves_top),
             ("typing_body", typing_body),
         ):
             out_p = os.path.join(SPRITE_DIR, f"{arm_name}.png")
             arm_img.save(out_p)
             print(f"Prepared sprite: {out_p}")
         arms_check_path = os.path.join(BRAIN_DIR, "arms_cutout_check.png")
-        save_arms_cutout_check(arm_left, arm_right, typing_body, arms_check_path)
+        save_arms_cutout_check(arm_left, arm_right, sleeves_top, typing_body, arms_check_path)
         print(f"Arms cutout check saved: {arms_check_path}")
 
     preview_path = os.path.join(PROJ_DIR, "assets", "sprites_preview.png")

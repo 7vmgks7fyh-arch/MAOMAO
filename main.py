@@ -369,7 +369,7 @@ class StarryCatgirlPet(QWidget):
             )
             self.hit_grids[name] = img
 
-        for arm_name in ("arm_left", "arm_right"):
+        for arm_name in ("arm_left", "arm_right", "sleeves_top"):
             arm_path = os.path.join(SPRITE_DIR, f"{arm_name}.png")
             arm_pm = QPixmap(arm_path) if os.path.isfile(arm_path) else QPixmap()
             if not arm_pm.isNull():
@@ -619,7 +619,7 @@ class StarryCatgirlPet(QWidget):
         # 若小键盘正在弹出，点击小键盘所在矩形也直接命中
         if self.keyboard_pop.value > 0.2:
             kb_cx = sprite_left + self.pet_size * 0.5
-            kb_cy = sprite_top + self.pet_size * 0.822
+            kb_cy = sprite_top + self.pet_size * 0.812
             kb_rect = QRectF(
                 kb_cx - self.pet_size * 0.32,
                 kb_cy - self.pet_size * 0.13,
@@ -2075,14 +2075,14 @@ class StarryCatgirlPet(QWidget):
             painter.drawPixmap(target_rect, curr_pm, QRectF(curr_pm.rect()))
         painter.restore()
 
-        # 3b. 绘制弹出式星辰迷你小键盘与原装手绘双臂（Live2D 肩关节绑定旋转）
+        # 3b. 绘制弹出式星辰迷你小键盘与原装手绘双臂（Live2D 肩关节绑定旋转 + 顶层袖口遮罩）
         if self.keyboard_pop.value > 0.03:
             self._draw_starry_keyboard_and_arms(
                 painter,
                 pet_transform,
                 target_rect,
                 cx + dx,
-                self.margin + self.pet_size * 0.822 + dy + self.kb_shake.value,
+                self.margin + self.pet_size * 0.812 + dy + self.kb_shake.value,
             )
 
         # 4. 绘制飞行中的可爱小鱼干
@@ -2252,23 +2252,34 @@ class StarryCatgirlPet(QWidget):
 
         painter.restore()
 
-        # 2. 直接使用与猫猫主体相同的 pet_transform 挂载原装手绘左右手臂（绕真肩枢轴旋转）
+        # 2. 直接使用与猫猫主体相同的 pet_transform 挂载原装手绘左右手臂（绕真实肩枢轴旋转）
+        if self.active_sprite_key != "typing_body":
+            return
+
         draw_x = target_rect.x()
         draw_y = target_rect.y()
         arm_blend = min(1.0, pop)
         hit_space = self.typing_pose == "both_down"
 
-        # 左臂：press=0.0 高举(+72°)，press=1.0 拍键(-34° / 空格 -46°)
-        p_l = max(-0.1, min(1.1, self.left_paw_press.value))
-        deg_l = (72.0 * (1.0 - p_l) + (-46.0 if hit_space else -34.0) * p_l) * arm_blend
-        scale_l = 1.0 + max(0.0, p_l - 0.5) * 0.14 * arm_blend
-        pivot_l = QPointF(draw_x + self.pet_size * 0.376, draw_y + self.pet_size * 0.656)
+        # 若猫猫当前镜像朝左，自动互换左右臂按压通道，使屏幕左/右手臂永远对应键盘左/右亮灯区
+        if self.rig.flip_scale.value < 0.0:
+            raw_p_l = self.right_paw_press.value
+            raw_p_r = self.left_paw_press.value
+        else:
+            raw_p_l = self.left_paw_press.value
+            raw_p_r = self.right_paw_press.value
 
-        # 右臂：press=0.0 高举(-72°)，press=1.0 拍键(+26° / 空格 +40°)
-        p_r = max(-0.1, min(1.1, self.right_paw_press.value))
-        deg_r = (-72.0 * (1.0 - p_r) + (40.0 if hit_space else 26.0) * p_r) * arm_blend
-        scale_r = 1.0 + max(0.0, p_r - 0.5) * 0.14 * arm_blend
-        pivot_r = QPointF(draw_x + self.pet_size * 0.614, draw_y + self.pet_size * 0.656)
+        # 左臂：press=0.0 高举(+44°)，press=1.0 拍键(-30° / 空格 -42°)
+        p_l = max(-0.1, min(1.1, raw_p_l))
+        deg_l = (44.0 * (1.0 - p_l) + (-42.0 if hit_space else -30.0) * p_l) * arm_blend
+        scale_l = 1.0 + max(0.0, p_l - 0.5) * 0.12 * arm_blend
+        pivot_l = QPointF(draw_x + self.pet_size * 0.344, draw_y + self.pet_size * 0.685)
+
+        # 右臂：press=0.0 高举(-44°)，press=1.0 拍键(+30° / 空格 +42°)
+        p_r = max(-0.1, min(1.1, raw_p_r))
+        deg_r = (-44.0 * (1.0 - p_r) + (42.0 if hit_space else 30.0) * p_r) * arm_blend
+        scale_r = 1.0 + max(0.0, p_r - 0.5) * 0.12 * arm_blend
+        pivot_r = QPointF(draw_x + self.pet_size * 0.609, draw_y + self.pet_size * 0.688)
 
         for arm_key, pivot, deg, arm_sc in (
             ("arm_left", pivot_l, deg_l, scale_l),
@@ -2284,6 +2295,14 @@ class StarryCatgirlPet(QWidget):
             painter.scale(1.0, arm_sc)
             painter.translate(-pivot)
             painter.drawPixmap(target_rect, arm_pm, QRectF(arm_pm.rect()))
+            painter.restore()
+
+        # 3. 顶层袖口遮罩层（sleeves_top）：覆盖双臂球形关节头，确保手臂严丝合缝从荷叶边袖口伸出
+        sleeves_pm = self.arm_sprites.get("sleeves_top")
+        if sleeves_pm is not None and not sleeves_pm.isNull():
+            painter.save()
+            painter.setTransform(pet_transform, combine=True)
+            painter.drawPixmap(target_rect, sleeves_pm, QRectF(sleeves_pm.rect()))
             painter.restore()
 
     @staticmethod
