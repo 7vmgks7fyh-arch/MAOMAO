@@ -35,8 +35,9 @@ from config_store import (
     save_config,
     set_autostart,
 )
-from motion import ActionQueue, ActionStep, PoseRig
+from motion import ActionQueue, ActionStep, PoseRig, SpringValue
 from sound_fx import SoundManager
+from typing_monitor import TypingMonitor
 from widgets import BubbleWidget, LaserToyWidget, StatusDialog
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -70,7 +71,7 @@ SPRITE_FALLBACKS = {
 
 @dataclass
 class Particle:
-    """画面上的星尘、爱心、Zzz 等轻量粒子特效。"""
+    """画面上的星尘、爱心、Zzz、代码浮字等轻量粒子特效。"""
 
     x: float
     y: float
@@ -78,11 +79,12 @@ class Particle:
     vy: float
     life: float
     max_life: float
-    kind: str  # "star" | "heart" | "zzz" | "spark"
+    kind: str  # "star" | "heart" | "zzz" | "spark" | "code"
     size: float
     color: QColor
     rot: float = 0.0
     vrot: float = 0.0
+    text: str = ""
 
 
 @dataclass
@@ -189,6 +191,17 @@ class StarryCatgirlPet(QWidget):
         "hungry": [
             "咕噜……肚子有点饿啦，鼠标中键能丢一条小鱼干给我吗~🐟",
         ],
+        "typing_start": [
+            "发现主人开始码字！本喵也掏出星辰小键盘陪你⌨️✨",
+            "哒哒哒~ 开启同步写代码模式，今天效率拉满！",
+        ],
+        "typing_wake": [
+            "唔……听到键盘声啦，起来掏出小键盘陪你一起敲⌨️",
+        ],
+        "typing_done": [
+            "一口气敲了这么多字，伸个懒腰休息下吧~✨",
+            "呼——本轮码字达成！写出来的代码一定一遍过！",
+        ],
         "idle_chatter": [
             "今天的代码写得顺利吗？记得歇歇眼睛哦~",
             "试着在头顶轻轻来回滑动鼠标，可以rua到本喵害羞蹭手哦！",
@@ -229,8 +242,22 @@ class StarryCatgirlPet(QWidget):
         self.antigravity_mode = self.cfg.antigravity
         self.auto_walk_enabled = self.cfg.auto_walk
         self.follow_mouse = self.cfg.follow_mouse
+        self.typing_sync = self.cfg.typing_sync
         self.laser_mode = False
         self.always_on_top = self.cfg.always_on_top
+
+        # 同步模仿打字状态与弹性通道
+        self.typing_idle_timer = 0.0
+        self.typing_session_keys = 0
+        self.typing_bubble_cooldown = 0.0
+        self.sleep_wake_taps: list[float] = []
+        self.recent_type_times: list[float] = []
+        self.typing_hand = "left"
+        self.last_lit_zone = ""
+        self.key_lit_timer = 0.0
+        self.left_paw_press = SpringValue(0.0, 0.0, stiffness=320.0, damping=20.0)
+        self.right_paw_press = SpringValue(0.0, 0.0, stiffness=320.0, damping=20.0)
+        self.keyboard_pop = SpringValue(0.0, 0.0, stiffness=210.0, damping=18.0)
 
         self.pos_x = 0.0
         self.pos_y = 0.0
@@ -271,7 +298,7 @@ class StarryCatgirlPet(QWidget):
         self.pomodoro_remaining_sec = 0
         self.drink_elapsed_sec = 0
 
-        # 音效、气泡、逗猫光球、状态卡片
+        # 音效、气泡、逗猫光球、状态卡片、打字感知器
         self.sound = SoundManager(self, enabled=self.cfg.sound_enabled)
         self.bubble = BubbleWidget()
         self.laser_toy = LaserToyWidget()
@@ -280,6 +307,8 @@ class StarryCatgirlPet(QWidget):
         self.status_dialog.pomodoro_toggled.connect(self.toggle_pomodoro)
         self.status_dialog.laser_toggled.connect(lambda: self.toggle_laser_mode(not self.laser_mode))
         self.status_dialog.trick_requested.connect(self.perform_backflip)
+        self.typing_monitor = TypingMonitor(self, enabled=self.typing_sync)
+        self.typing_monitor.key_tapped.connect(self._on_global_key_tap)
 
         # 恢复保存的坐标或默认放置
         self._place_initial_position()
@@ -457,6 +486,12 @@ class StarryCatgirlPet(QWidget):
         act_follow.triggered.connect(self.toggle_follow_mouse)
         menu.addAction(act_follow)
 
+        act_typing = QAction("⌨️ 同步模仿打字", menu)
+        act_typing.setCheckable(True)
+        act_typing.setChecked(self.typing_sync)
+        act_typing.triggered.connect(self.toggle_typing_sync)
+        menu.addAction(act_typing)
+
         act_walk = QAction("🚶 桌面自由散步", menu)
         act_walk.setCheckable(True)
         act_walk.setChecked(self.auto_walk_enabled)
@@ -551,19 +586,35 @@ class StarryCatgirlPet(QWidget):
             return self.state
         if self.state == "flip":
             return "happy"
+        if self.state == "typing":
+            # 固定稳固坐姿，配合实时弹出星辰小键盘与左右爪拍打，绝不闪跳
+            return "sit"
         if self.state == "walk":
             # 锁相双步态：仅在 walk_a 与 walk_b 之间交替迈步，避免夹入 idle 引起手部闪跳
             return ("walk_a", "walk_b")[int(self._walk_stride_phase()) % 2]
         return "idle"
 
     def _is_point_on_pet(self, local_pt: QPoint) -> bool:
-        """检查窗口逻辑坐标是否落在猫猫本体像素（含 10px 友好容错边缘）上。"""
+        """检查窗口逻辑坐标是否落在猫猫本体（或弹出的星辰小键盘）上。"""
         sprite_left = float(self.margin) + self.rig.dx.value
         sprite_top = float(self.margin) + self.render_dy
         sprite_rect = QRectF(sprite_left, sprite_top, float(self.pet_size), float(self.pet_size))
 
         if not sprite_rect.adjusted(-10, -10, 10, 10).contains(QPointF(local_pt)):
             return False
+
+        # 若小键盘正在弹出，点击小键盘所在矩形也直接命中
+        if self.keyboard_pop.value > 0.2:
+            kb_cx = sprite_left + self.pet_size * 0.5
+            kb_cy = sprite_top + self.pet_size * 0.85
+            kb_rect = QRectF(
+                kb_cx - self.pet_size * 0.34,
+                kb_cy - self.pet_size * 0.14,
+                self.pet_size * 0.68,
+                self.pet_size * 0.28,
+            )
+            if kb_rect.contains(QPointF(local_pt)):
+                return True
 
         nx = (local_pt.x() - sprite_left) / max(1.0, float(self.pet_size))
         ny = (local_pt.y() - sprite_top) / max(1.0, float(self.pet_size))
@@ -1020,27 +1071,46 @@ class StarryCatgirlPet(QWidget):
         self.update()
         self.save_state()
 
+    def toggle_typing_sync(self, checked: bool):
+        self.typing_sync = bool(checked)
+        self.cfg.typing_sync = self.typing_sync
+        self.typing_monitor.set_enabled(self.typing_sync)
+        if self.typing_sync:
+            self.sound.play("pet")
+            self.say("⌨️ 同步模仿打字已开启！快敲键盘试试看~")
+        else:
+            if self.state == "typing":
+                self._finish_typing_session(quiet=True)
+            self.say("⌨️ 已暂停同步模仿打字~")
+        self.save_state()
+
     def toggle_visibility(self):
         if self.isVisible():
             if self.laser_mode:
                 self.laser_mode = False
                 self.laser_toy.stop()
+            self.typing_monitor.stop()
             self.bubble.hide()
             self.status_dialog.hide()
             self.hide()
         else:
             self.show()
             self.raise_()
+            if self.typing_sync:
+                self.typing_monitor.start()
             self.say("我回来啦！✨")
 
     def wake_from_external(self):
         if not self.isVisible():
             self.show()
         self.raise_()
+        if self.typing_sync:
+            self.typing_monitor.start()
         self.trigger_happy("喵呜~ 我已经在桌面上啦，不用重复召唤我哦✨")
 
     def quit_app(self):
         self.save_state()
+        self.typing_monitor.stop()
         self.laser_toy.stop()
         self.laser_toy.close()
         self.bubble.close()
@@ -1211,6 +1281,151 @@ class StarryCatgirlPet(QWidget):
             self.say("咻——反重力小跳！✨", 2200)
             event.accept()
 
+    # ---------- 同步模仿打字感知与收尾演出 ----------
+    def _spawn_code_particle(self):
+        """在星辰小键盘上方冒出可爱的迷你代码符号/音符浮字。"""
+        cx = self.width() * 0.5 + self.rig.dx.value
+        cy = self.margin + self.pet_size * 0.72 + self.render_dy
+        glyph = random.choice(["{ }", "<>", "0", "1", "★", "♪", "()"])
+        col = random.choice(
+            [
+                QColor(115, 130, 245),
+                QColor(235, 120, 195),
+                QColor(95, 195, 235),
+                QColor(245, 185, 70),
+            ]
+        )
+        self.particles.append(
+            Particle(
+                x=cx + random.uniform(-self.pet_size * 0.24, self.pet_size * 0.24),
+                y=cy + random.uniform(-6, 6),
+                vx=random.uniform(-22, 22),
+                vy=random.uniform(-68, -42),
+                life=0.0,
+                max_life=random.uniform(0.75, 1.15),
+                kind="code",
+                size=random.uniform(9.5, 12.5),
+                color=col,
+                rot=0.0,
+                vrot=0.0,
+                text=glyph,
+            )
+        )
+
+    def _finish_typing_session(self, quiet: bool = False):
+        """停止打字后自动收起小键盘并连贯过渡回休息/待机态。"""
+        keys = self.typing_session_keys
+        self.typing_session_keys = 0
+        self.typing_idle_timer = 0.0
+        self.recent_type_times.clear()
+        self.left_paw_press.target = 0.0
+        self.right_paw_press.target = 0.0
+        self.keyboard_pop.target = 0.0
+
+        if not quiet and keys >= 30:
+            msg = random.choice(self.LINES["typing_done"]) if self.typing_bubble_cooldown <= 0.0 else None
+            if msg:
+                self.typing_bubble_cooldown = 45.0
+            self._start_sequence(
+                [
+                    ActionStep("sit", 0.70),
+                    ActionStep("happy", 0.90, message=msg, particle_kind="star", particle_count=6, sound="pet"),
+                    ActionStep("idle", 0.1),
+                ]
+            )
+        else:
+            self._start_sequence(
+                [
+                    ActionStep("sit", 0.75),
+                    ActionStep("idle", 0.1),
+                ]
+            )
+        self.save_state()
+
+    def _on_global_key_tap(self, hand: str):
+        """响应全局键盘输入（仅接收匿名左右手/双手拍键，绝不接触具体按键内容）。"""
+        if (
+            not self.typing_sync
+            or not self.isVisible()
+            or self.dragging
+            or self.laser_mode
+            or self.state in ("overload", "flip", "eat")
+        ):
+            return
+
+        now = time.perf_counter()
+
+        # 若猫猫正在打盹，需连续敲 3 下才温和唤醒，避免误触吵醒
+        if self.state == "sleep":
+            self.sleep_wake_taps = [t for t in self.sleep_wake_taps if now - t < 2.0]
+            self.sleep_wake_taps.append(now)
+            if len(self.sleep_wake_taps) < 3:
+                return
+            self.sleep_wake_taps.clear()
+            self.action_queue.clear()
+            self._set_state("typing")
+            self.rig.impulse_squash(0.14)
+            if self.typing_bubble_cooldown <= 0.0:
+                self.typing_bubble_cooldown = 45.0
+                self.say(random.choice(self.LINES["typing_wake"]), 3400)
+
+        self.typing_idle_timer = 0.0
+        self.typing_session_keys += 1
+        self.cfg.type_count += 1
+        if self.cfg.type_count % 100 == 0:
+            self._add_affection(1)
+        else:
+            self._refresh_status_if_open()
+
+        self.recent_type_times = [t for t in self.recent_type_times if now - t < 1.5]
+        self.recent_type_times.append(now)
+        is_fast = len(self.recent_type_times) >= 10
+
+        if self.state != "typing":
+            self.action_queue.clear()
+            self._set_state("typing")
+            self.state_timer = 0.0
+            self.vx = 0.0
+            self.vy = 0.0
+            self.rig.impulse_squash(0.13)
+            if self.typing_bubble_cooldown <= 0.0:
+                self.typing_bubble_cooldown = 45.0
+                self.sound.play("pet")
+                self.say(random.choice(self.LINES["typing_start"]), 3400)
+
+        # 左右萌爪交替拍键 + 键盘区亮点反馈
+        if hand == "left":
+            self.typing_hand = "left"
+            self.last_lit_zone = "left"
+            self.left_paw_press.snap(1.0)
+            self.left_paw_press.target = 0.0
+            self.right_paw_press.target = 0.0
+            self.rig.impulse_tilt(-12.0)
+            self.rig.impulse_squash(0.04)
+        elif hand == "right":
+            self.typing_hand = "right"
+            self.last_lit_zone = "right"
+            self.right_paw_press.snap(1.0)
+            self.right_paw_press.target = 0.0
+            self.left_paw_press.target = 0.0
+            self.rig.impulse_tilt(12.0)
+            self.rig.impulse_squash(0.04)
+        else:  # both（Space / Enter 双手齐拍）
+            self.typing_hand = "right" if self.typing_hand == "left" else "left"
+            self.last_lit_zone = "space"
+            self.left_paw_press.snap(1.0)
+            self.left_paw_press.target = 0.0
+            self.right_paw_press.snap(1.0)
+            self.right_paw_press.target = 0.0
+            self.rig.impulse_squash(0.085)
+            self.spawn_burst("star", 3)
+
+        self.key_lit_timer = 0.18
+        if is_fast or random.random() < 0.55:
+            self._spawn_code_particle()
+        if is_fast and random.random() < 0.45:
+            self.spawn_burst("spark" if random.random() < 0.5 else "star", 1)
+
     # ---------- 60 FPS 与 1 秒循环 ----------
     def _on_second_tick(self):
         self.cfg.companion_seconds += 1
@@ -1259,10 +1474,26 @@ class StarryCatgirlPet(QWidget):
         self.anim_time += dt
         self.state_timer += dt
         self.chatter_cooldown -= dt
+        if self.typing_bubble_cooldown > 0.0:
+            self.typing_bubble_cooldown = max(0.0, self.typing_bubble_cooldown - dt)
+        if self.key_lit_timer > 0.0:
+            self.key_lit_timer = max(0.0, self.key_lit_timer - dt)
         if self.rub_cooldown > 0.0:
             self.rub_cooldown = max(0.0, self.rub_cooldown - dt)
         if self.laser_pounce_cooldown > 0.0:
             self.laser_pounce_cooldown = max(0.0, self.laser_pounce_cooldown - dt)
+
+        # 更新星辰小键盘弹出与左右萌爪弹簧
+        self.keyboard_pop.target = 1.0 if (self.state == "typing" and not self.dragging) else 0.0
+        self.keyboard_pop.step(dt)
+        self.left_paw_press.step(dt)
+        self.right_paw_press.step(dt)
+
+        # 停止敲键盘 2.8 秒后自动收起小键盘并连贯收尾
+        if self.state == "typing" and not self.dragging:
+            self.typing_idle_timer += dt
+            if self.typing_idle_timer >= 2.8:
+                self._finish_typing_session(quiet=False)
 
         bounds = self._screen_bounds()
         floor_y = self._floor_y()
@@ -1661,6 +1892,20 @@ class StarryCatgirlPet(QWidget):
             if cur_step is not None and cur_step.duration <= 0.5:
                 # 蓄力下压准备起跳！
                 tsx, tsy, ty = 1.12, 0.86, 6.0
+        elif self.state == "typing":
+            now = time.perf_counter()
+            self.recent_type_times = [t for t in self.recent_type_times if now - t < 1.5]
+            fast = len(self.recent_type_times) >= 10
+            if fast:
+                # 高速码字狂热律动：前倾微抖
+                tx = math.sin(self.anim_time * 32.0) * 1.8
+                ty = abs(math.sin(self.anim_time * 18.0)) * -3.5
+                tsx, tsy = 1.03, 0.97
+                tangle = math.sin(self.anim_time * 16.0) * 2.6
+            else:
+                breath = math.sin(self.anim_time * 3.8)
+                tsx = 1.0 + breath * 0.014
+                tsy = 1.0 - breath * 0.016
         elif self.state == "eat":
             chew = math.sin(self.anim_time * 11.5)
             tsy = 1.0 + chew * 0.028
@@ -1785,6 +2030,10 @@ class StarryCatgirlPet(QWidget):
             painter.drawPixmap(target_rect, curr_pm, QRectF(curr_pm.rect()))
         painter.restore()
 
+        # 3b. 绘制弹出式星辰迷你小键盘与左右萌爪实时拍击动画
+        if self.keyboard_pop.value > 0.03:
+            self._draw_starry_keyboard(painter, cx + dx, self.margin + self.pet_size * 0.85 + dy)
+
         # 4. 绘制飞行中的可爱小鱼干
         for fish in self.flying_fishes:
             t = min(1.0, fish.elapsed / fish.duration)
@@ -1818,7 +2067,171 @@ class StarryCatgirlPet(QWidget):
                 painter.setFont(f)
                 painter.setPen(col)
                 painter.drawText(QPointF(0, 0), "Z")
+            elif p.kind == "code":
+                painter.rotate(-math.degrees(p.rot))
+                f = QFont("Consolas", int(max(8, p.size * (0.9 + 0.25 * math.sin(t * math.pi)))), QFont.Bold)
+                painter.setFont(f)
+                # 微描边增强白底或深色背景下的清晰度
+                painter.setPen(QColor(42, 45, 96, int(col.alpha() * 0.65)))
+                painter.drawText(QPointF(-9, 1), p.text)
+                painter.setPen(col)
+                painter.drawText(QPointF(-10, 0), p.text)
             painter.restore()
+
+    def _draw_starry_keyboard(self, painter: QPainter, center_x: float, center_y: float):
+        """在坐姿猫猫身前绘制带粗深蓝描边的星辰迷你小键盘与左右软萌爪爪拍击动画。"""
+        pop = max(0.0, self.keyboard_pop.value)
+        alpha = max(0.0, min(1.0, pop * 1.35))
+        scale = 0.45 + 0.55 * pop
+        y_slide = (1.0 - min(1.2, pop)) * 14.0
+
+        kb_w = self.pet_size * 0.60
+        kb_h = self.pet_size * 0.21
+        outline_col = QColor(42, 45, 96)
+
+        painter.save()
+        painter.setOpacity(alpha)
+        painter.translate(center_x, center_y + y_slide)
+        painter.scale(scale, scale)
+
+        # 键盘底影
+        painter.setBrush(QColor(42, 45, 96, 36))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(QRectF(-kb_w * 0.51, -kb_h * 0.42 + 3.0, kb_w * 1.02, kb_h), 9, 9)
+
+        # 键盘机身（前透视圆角梯形，浅紫蓝渐变 + 深蓝粗描边）
+        body = QPainterPath()
+        top_half = kb_w * 0.46
+        bot_half = kb_w * 0.52
+        y_top = -kb_h * 0.50
+        y_bot = kb_h * 0.50
+        body.moveTo(-top_half + 6, y_top)
+        body.lineTo(top_half - 6, y_top)
+        body.quadTo(top_half, y_top, top_half + 2, y_top + 6)
+        body.lineTo(bot_half, y_bot - 6)
+        body.quadTo(bot_half, y_bot, bot_half - 7, y_bot)
+        body.lineTo(-bot_half + 7, y_bot)
+        body.quadTo(-bot_half, y_bot, -bot_half, y_bot - 6)
+        body.lineTo(-top_half - 2, y_top + 6)
+        body.quadTo(-top_half, y_top, -top_half + 6, y_top)
+        body.closeSubpath()
+
+        kb_grad = QLinearGradient(0, y_top, 0, y_bot)
+        kb_grad.setColorAt(0.0, QColor(232, 226, 255))
+        kb_grad.setColorAt(1.0, QColor(178, 174, 240))
+        painter.setBrush(kb_grad)
+        painter.setPen(QPen(outline_col, 2.3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(body)
+
+        # 右上角迷你金色四角星指示灯
+        painter.save()
+        painter.translate(top_half - 8, y_top + 6)
+        self._draw_star(painter, 3.8, QColor(255, 222, 105))
+        painter.restore()
+
+        # 键帽布局与实时星光高亮
+        lit_active = self.key_lit_timer > 0.0
+        glow_ratio = max(0.0, min(1.0, self.key_lit_timer / 0.18))
+
+        rows = 2
+        cols = 8
+        grid_w = kb_w * 0.80
+        grid_h = kb_h * 0.48
+        gx0 = -grid_w * 0.5
+        gy0 = y_top + kb_h * 0.15
+        kw = (grid_w - (cols - 1) * 2.5) / cols
+        kh = (grid_h - 2.5) / rows
+
+        for r in range(rows):
+            for c in range(cols):
+                zone = "left" if c < 4 else "right"
+                is_lit = lit_active and (self.last_lit_zone == zone)
+                kx = gx0 + c * (kw + 2.5)
+                ky = gy0 + r * (kh + 2.5) + (1.3 * glow_ratio if is_lit else 0.0)
+                if is_lit:
+                    fill = QColor(255, 210, 145) if zone == "left" else QColor(150, 230, 255)
+                else:
+                    fill = QColor(253, 252, 255) if (r + c) % 2 == 0 else QColor(240, 236, 255)
+                painter.setBrush(fill)
+                painter.setPen(QPen(outline_col, 1.15))
+                painter.drawRoundedRect(QRectF(kx, ky, kw, kh), 2.2, 2.2)
+
+        # 底部长空格键与左右功能键
+        sp_y = gy0 + grid_h + 2.8 + (1.4 * glow_ratio if (lit_active and self.last_lit_zone == "space") else 0.0)
+        sp_h = max(4.5, kb_h * 0.21)
+        sp_w = kb_w * 0.46
+        sp_fill = QColor(255, 195, 232) if (lit_active and self.last_lit_zone == "space") else QColor(253, 250, 255)
+        painter.setBrush(sp_fill)
+        painter.setPen(QPen(outline_col, 1.25))
+        painter.drawRoundedRect(QRectF(-sp_w * 0.5, sp_y, sp_w, sp_h), 2.5, 2.5)
+
+        side_w = kb_w * 0.14
+        painter.setBrush(QColor(198, 192, 248))
+        painter.drawRoundedRect(QRectF(-sp_w * 0.5 - side_w - 3, sp_y, side_w, sp_h), 2.2, 2.2)
+        painter.drawRoundedRect(QRectF(sp_w * 0.5 + 3, sp_y, side_w, sp_h), 2.2, 2.2)
+
+        # 绘制左右软萌小手/爪爪交替拍击键盘
+        self._draw_typing_paw(
+            painter,
+            -kb_w * 0.23,
+            y_top + 1.5,
+            self.left_paw_press.value,
+            is_left=True,
+            lit=(lit_active and self.last_lit_zone in ("left", "space")),
+        )
+        self._draw_typing_paw(
+            painter,
+            kb_w * 0.23,
+            y_top + 1.5,
+            self.right_paw_press.value,
+            is_left=False,
+            lit=(lit_active and self.last_lit_zone in ("right", "space")),
+        )
+
+        painter.restore()
+
+    @staticmethod
+    def _draw_typing_paw(
+        painter: QPainter,
+        x: float,
+        base_y: float,
+        press: float,
+        is_left: bool,
+        lit: bool,
+    ):
+        """绘制带深蓝金边袖口的软萌 Q 版小手，随弹簧按压值上下拍打键帽。"""
+        p = max(-0.2, min(1.2, press))
+        # press=0 抬起在上方准备，press=1 拍下触键
+        py = base_y - 9.0 + p * 12.5
+        sx = 1.0 + max(0.0, p) * 0.08
+        sy = 1.0 - max(0.0, p) * 0.08
+        outline_col = QColor(42, 45, 96)
+
+        if lit and p > 0.35:
+            ring_r = 7.0 + (1.0 - p) * 8.0
+            ring_col = QColor(255, 190, 225, int(190 * p)) if is_left else QColor(145, 225, 255, int(190 * p))
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(ring_col, 1.8))
+            painter.drawEllipse(QPointF(x, base_y + 4.0), ring_r, ring_r * 0.55)
+
+        painter.save()
+        painter.translate(x, py)
+        painter.rotate(-8.0 if is_left else 8.0)
+        painter.scale(sx, sy)
+
+        # 深蓝星辰袖口（带金色边线，呼应猫猫服饰）
+        painter.setBrush(QColor(52, 54, 108))
+        painter.setPen(QPen(outline_col, 2.0))
+        painter.drawRoundedRect(QRectF(-7.5, -10.5, 15.0, 9.0), 4.0, 4.0)
+        painter.setPen(QPen(QColor(238, 205, 128), 1.4))
+        painter.drawLine(QPointF(-6.0, -3.0), QPointF(6.0, -3.0))
+
+        # 粉嫩圆润小手掌
+        painter.setBrush(QColor(255, 232, 226))
+        painter.setPen(QPen(outline_col, 2.0))
+        painter.drawEllipse(QPointF(0.0, 2.5), 7.2, 6.2)
+
+        painter.restore()
 
     @staticmethod
     def _draw_fish(painter: QPainter, x: float, y: float, angle_deg: float, scale: float):

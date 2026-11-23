@@ -401,12 +401,13 @@ class StatusDialog(QWidget):
         self.sat_bar.setTextVisible(False)
         layout.addWidget(self.sat_bar)
 
-        # 三格统计卡片
+        # 2×2 四格统计卡片
         stats_grid = QGridLayout()
-        stats_grid.setSpacing(8)
-        self.feed_num_lbl = self._make_stat_box(stats_grid, 0, "🐟 投喂小鱼干", "0 次")
-        self.pet_num_lbl = self._make_stat_box(stats_grid, 1, "🖐️ 摸头顺毛", "0 次")
-        self.time_num_lbl = self._make_stat_box(stats_grid, 2, "⏳ 陪伴时长", "0秒")
+        stats_grid.setSpacing(7)
+        self.feed_num_lbl = self._make_stat_box(stats_grid, 0, 0, "🐟 投喂小鱼干", "0 次")
+        self.pet_num_lbl = self._make_stat_box(stats_grid, 0, 1, "🖐️ 摸头顺毛", "0 次")
+        self.type_num_lbl = self._make_stat_box(stats_grid, 1, 0, "⌨️ 陪你码字", "0 键")
+        self.time_num_lbl = self._make_stat_box(stats_grid, 1, 1, "⏳ 陪伴时长", "0秒")
         layout.addLayout(stats_grid)
 
         # 小助手状态栏
@@ -460,7 +461,7 @@ class StatusDialog(QWidget):
         row2.addWidget(btn_close, 1)
         layout.addLayout(row2)
 
-    def _make_stat_box(self, grid: QGridLayout, col: int, title: str, value: str) -> QLabel:
+    def _make_stat_box(self, grid: QGridLayout, row: int, col: int, title: str, value: str) -> QLabel:
         box = QFrame()
         box.setStyleSheet(
             "background-color: #ffffff; border: 1px solid #e3dff8; border-radius: 10px;"
@@ -476,7 +477,7 @@ class StatusDialog(QWidget):
         val_lbl.setStyleSheet("font-size: 12px; font-weight: 700; color: #2b2e64; border: none;")
         v.addWidget(t_lbl)
         v.addWidget(val_lbl)
-        grid.addWidget(box, 0, col)
+        grid.addWidget(box, row, col)
         return val_lbl
 
     def refresh(
@@ -501,6 +502,7 @@ class StatusDialog(QWidget):
 
         self.feed_num_lbl.setText(f"{cfg.feed_count} 次")
         self.pet_num_lbl.setText(f"{cfg.pet_count} 次")
+        self.type_num_lbl.setText(f"{cfg.type_count} 键")
         self.time_num_lbl.setText(format_duration(cfg.companion_seconds))
 
         self.btn_laser.setText("🪄 收起逗猫棒" if laser_active else "🪄 逗猫棒")

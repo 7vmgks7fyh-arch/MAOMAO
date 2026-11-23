@@ -36,6 +36,7 @@ class PetConfig:
     antigravity: bool = False
     always_on_top: bool = True
     sound_enabled: bool = True
+    typing_sync: bool = True
     drink_reminder_enabled: bool = False
     drink_interval_min: int = 45
     affection: int = 20
@@ -43,6 +44,7 @@ class PetConfig:
     feed_count: int = 0
     pet_count: int = 0
     trick_count: int = 0
+    type_count: int = 0
     companion_seconds: int = 0
 
 
@@ -91,6 +93,7 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> PetConfig:
     cfg.feed_count = max(0, int(cfg.feed_count))
     cfg.pet_count = max(0, int(cfg.pet_count))
     cfg.trick_count = max(0, int(cfg.trick_count))
+    cfg.type_count = max(0, int(cfg.type_count))
     cfg.companion_seconds = max(0, int(cfg.companion_seconds))
     return cfg
 
