@@ -37,6 +37,7 @@ class PetConfig:
     always_on_top: bool = True
     sound_enabled: bool = True
     typing_sync: bool = True
+    live2d_enabled: bool = True
     drink_reminder_enabled: bool = False
     drink_interval_min: int = 45
     affection: int = 20

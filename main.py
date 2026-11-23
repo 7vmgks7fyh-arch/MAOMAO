@@ -36,6 +36,7 @@ from config_store import (
     save_config,
     set_autostart,
 )
+from live2d_rig import Live2DController, Live2DMeshWarper
 from motion import ActionQueue, ActionStep, PoseRig, SpringValue
 from sound_fx import SoundManager
 from typing_monitor import TypingMonitor
@@ -223,11 +224,14 @@ class StarryCatgirlPet(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
 
-        # 加载 11 套透明精灵图与原装拆件双臂
+        # 加载 11 套透明精灵图、原装拆件双臂及 Live2D 2x 变形器
         self.sprites: dict[str, QPixmap] = {}
         self.hit_grids: dict[str, QImage] = {}
         self.arm_sprites: dict[str, QPixmap] = {}
         self._load_sprites()
+        self.live2d_enabled = self.cfg.live2d_enabled
+        self.live2d = Live2DController()
+        self.live2d_warper = Live2DMeshWarper(SPRITE_DIR)
 
         # 基础视觉尺寸与窗口尺寸
         self.pet_size = self.cfg.pet_size
@@ -510,6 +514,12 @@ class StarryCatgirlPet(QWidget):
         act_walk.setChecked(self.auto_walk_enabled)
         act_walk.triggered.connect(self.toggle_auto_walk)
         menu.addAction(act_walk)
+
+        act_live2d = QAction("✨ Live2D 灵动物理 (追视/眨眼/抖耳)", menu)
+        act_live2d.setCheckable(True)
+        act_live2d.setChecked(self.live2d_enabled)
+        act_live2d.triggered.connect(self.toggle_live2d)
+        menu.addAction(act_live2d)
 
         menu.addSeparator()
 
@@ -805,6 +815,7 @@ class StarryCatgirlPet(QWidget):
         self.cfg.antigravity = self.antigravity_mode
         self.cfg.always_on_top = self.always_on_top
         self.cfg.sound_enabled = self.sound.enabled
+        self.cfg.live2d_enabled = self.live2d_enabled
         save_config(self.cfg)
 
     def open_status_dialog(self):
@@ -898,6 +909,8 @@ class StarryCatgirlPet(QWidget):
         self.cfg.satiety = min(100, self.cfg.satiety + 18)
         self.spawn_burst("star", 10, (x, y))
         self.spawn_burst("heart", 6, (x, y))
+        self.live2d.impulse_ears(1.2, asymmetric=False)
+        self.live2d.impulse_ahoge(110.0)
 
         cur = self.action_queue.current()
         if cur is not None and cur.state == "eat":
@@ -1097,6 +1110,18 @@ class StarryCatgirlPet(QWidget):
             self.say("⌨️ 已暂停同步模仿打字~")
         self.save_state()
 
+    def toggle_live2d(self, checked: bool):
+        self.live2d_enabled = bool(checked)
+        self.cfg.live2d_enabled = self.live2d_enabled
+        if self.live2d_enabled:
+            self.live2d.trigger_blink()
+            self.live2d.impulse_ears(1.1, asymmetric=True)
+            self.say("✨ Live2D 灵动物理已开启！我会悄悄看着你哦~")
+        else:
+            self.say("✨ 已切回经典静态手绘渲染模式~")
+        self.update()
+        self.save_state()
+
     def toggle_visibility(self):
         if self.isVisible():
             if self.laser_mode:
@@ -1215,6 +1240,8 @@ class StarryCatgirlPet(QWidget):
                         self.rub_cooldown = 2.8
                         self.cfg.pet_count += 1
                         self.rig.impulse_tilt(22.0 if nx > 0.5 else -22.0)
+                        self.live2d.impulse_ears(1.15, asymmetric=False)
+                        self.live2d.impulse_ahoge(95.0 if nx > 0.5 else -95.0)
                         self.trigger_rub_sequence()
                         self._add_affection(2)
                         self.save_state()
@@ -1263,10 +1290,14 @@ class StarryCatgirlPet(QWidget):
                     nx = (event.position().x() - self.margin) / max(1.0, float(self.pet_size))
                     self.cfg.pet_count += 1
                     if ny < 0.42:
+                        self.live2d.impulse_ears(1.3, asymmetric=True)
+                        self.live2d.impulse_ahoge(130.0 if nx < 0.5 else -130.0)
                         self.trigger_happy(random.choice(self.LINES["pet_ear"]))
                         self._add_affection(2)
                     elif ny < 0.68:
                         self.rig.impulse_tilt(28.0 if nx > 0.5 else -28.0)
+                        self.live2d.impulse_ears(0.95, asymmetric=False)
+                        self.live2d.trigger_blink()
                         self.trigger_rub_sequence(random.choice(self.LINES["pet_cheek"]))
                         self._add_affection(2)
                     else:
@@ -1275,6 +1306,7 @@ class StarryCatgirlPet(QWidget):
                             self.action_queue.clear()
                             self._set_state("falling")
                         self.rig.impulse_squash(0.15)
+                        self.live2d.impulse_ahoge(-120.0)
                         self.spawn_burst("star", 5)
                         self.sound.play("jump")
                         self.say(random.choice(self.LINES["pet_foot"]))
@@ -1422,6 +1454,8 @@ class StarryCatgirlPet(QWidget):
             self.rig.impulse_tilt(-15.0)
             self.rig.impulse_squash(0.05)
             self.kb_shake.impulse(28.0)
+            self.live2d.impulse_ears(0.45, asymmetric=True)
+            self.live2d.impulse_ahoge(-52.0)
         elif hand == "right":
             if self.typing_pose == "right_down":
                 self.right_paw_press.value = 0.52
@@ -1434,6 +1468,8 @@ class StarryCatgirlPet(QWidget):
             self.rig.impulse_tilt(15.0)
             self.rig.impulse_squash(0.05)
             self.kb_shake.impulse(28.0)
+            self.live2d.impulse_ears(0.45, asymmetric=True)
+            self.live2d.impulse_ahoge(52.0)
         else:  # both（Space / Enter 双爪齐重拍）
             self.typing_hand = "right" if self.typing_hand == "left" else "left"
             self.typing_pose = "both_down"
@@ -1445,6 +1481,8 @@ class StarryCatgirlPet(QWidget):
             self.right_paw_press.target = 1.0
             self.rig.impulse_squash(0.10)
             self.kb_shake.impulse(45.0)
+            self.live2d.impulse_ears(0.85, asymmetric=False)
+            self.live2d.impulse_ahoge(95.0)
             self.spawn_burst("star", 3)
 
         self.key_lit_timer = 0.22
@@ -1650,6 +1688,25 @@ class StarryCatgirlPet(QWidget):
         # 同步弹簧姿势与交叉淡入淡出
         self._update_pose_rig(dt)
         self._sync_sprite_crossfade(dt)
+
+        # 同步 2.5D Live2D 视线追踪、自动眨眼与呆毛/猫耳物理
+        if self.live2d_enabled:
+            gpos = QCursor.pos()
+            pet_cx = self.pos_x + self.width() * 0.5
+            pet_cy = self.pos_y + self.margin + self.pet_size * 0.42 + self.render_dy
+            self.live2d.update(
+                dt=dt,
+                cursor_x=float(gpos.x()),
+                cursor_y=float(gpos.y()),
+                pet_cx=pet_cx,
+                pet_cy=pet_cy,
+                vx=self.vx,
+                vy=self.vy,
+                flipped=(self.rig.flip_scale.value < 0.0),
+                state=self.state,
+                anim_time=self.anim_time,
+                dragging=self.dragging,
+            )
 
         self.update()
 
@@ -2056,7 +2113,12 @@ class StarryCatgirlPet(QWidget):
 
         if self.crossfade_progress < 1.0 and self.prev_sprite_key != self.active_sprite_key:
             prev_pm = self.sprites[self.prev_sprite_key]
-            curr_pm = self.sprites[self.active_sprite_key]
+            curr_base = self.sprites[self.active_sprite_key]
+            curr_pm = (
+                self.live2d_warper.get_warped_pixmap(self.active_sprite_key, self.live2d, curr_base)
+                if self.live2d_enabled
+                else curr_base
+            )
             t = self.crossfade_progress
             # 底层 1.0 不透明 + 顶层渐变叠加，彻底避免 Porter-Duff 双半透明叠加发虚闪烁
             if t < 0.5:
@@ -2071,7 +2133,12 @@ class StarryCatgirlPet(QWidget):
                 painter.drawPixmap(target_rect, prev_pm, QRectF(prev_pm.rect()))
             painter.setOpacity(1.0)
         else:
-            curr_pm = self.sprites[self.active_sprite_key]
+            curr_base = self.sprites[self.active_sprite_key]
+            curr_pm = (
+                self.live2d_warper.get_warped_pixmap(self.active_sprite_key, self.live2d, curr_base)
+                if self.live2d_enabled
+                else curr_base
+            )
             painter.drawPixmap(target_rect, curr_pm, QRectF(curr_pm.rect()))
         painter.restore()
 

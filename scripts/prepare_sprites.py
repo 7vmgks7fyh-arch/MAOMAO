@@ -412,6 +412,108 @@ def save_arms_cutout_check(
     canvas.convert("RGB").save(out_path)
 
 
+def extract_clean_eat_lash(eat_rgba: np.ndarray, ecx: int, ecy: int) -> tuple[np.ndarray, np.ndarray, int, int]:
+    """从 eat.png 提取完整纯净的弯弯闭眼睫毛（剔除上方刘海与下方腮红）。"""
+    pw, ph = 27, 12
+    patch_rgb = eat_rgba[ecy - ph : ecy + ph + 1, ecx - pw : ecx + pw + 1, :3].copy()
+    pr = patch_rgb[:, :, 0].astype(np.float32)
+    pg = patch_rgb[:, :, 1].astype(np.float32)
+    pb = patch_rgb[:, :, 2].astype(np.float32)
+
+    eat_p = (pb > 138) & ((pb - pg) > 14)
+    eat_p_dil = cv2.dilate(eat_p.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1) > 0
+    lum = 0.25 * pr + 0.5 * pg + 0.25 * pb
+    lash_a = np.clip((216.0 - lum) / 36.0, 0.0, 1.0).astype(np.float32)
+    lash_a[(pg >= 165) | (pb >= 168) | eat_p_dil] = 0.0
+
+    mask_bin = (lash_a > 0.12).astype(np.uint8)
+    hk = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 2))
+    mask_closed = cv2.morphologyEx(mask_bin, cv2.MORPH_CLOSE, hk)
+    num_l, lbls, stats, _ = cv2.connectedComponentsWithStats(mask_closed, connectivity=8)
+    best_l = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) if num_l > 1 else 0
+    main_mask = (lbls == best_l).astype(np.float32)
+    lash_a_final = cv2.GaussianBlur(np.maximum(lash_a * main_mask, main_mask * 0.92), (3, 3), 0.45) * main_mask
+    return patch_rgb, lash_a_final, pw, ph
+
+
+def build_clean_blink_sprite(
+    base_img: Image.Image,
+    eat_img: Image.Image,
+    eyes_boxes: list[tuple[int, int, int, int, int]],
+    eat_centers: list[tuple[int, int]],
+) -> Image.Image:
+    """生成原画级无痕闭眼精灵图：先以真实鼻梁渐变肤色净底覆盖眼眶，再贴合原画弯月闭眼睫毛。"""
+    base = np.array(base_img.convert("RGBA"), dtype=np.uint8)
+    eat_rgba = np.array(eat_img.convert("RGBA"), dtype=np.uint8)
+    out = base.copy()
+    rgb = out[:, :, :3].copy()
+    r = rgb[:, :, 0].astype(np.int16)
+    g = rgb[:, :, 1].astype(np.int16)
+    b = rgb[:, :, 2].astype(np.int16)
+    yy, xx = np.mgrid[0:384, 0:384]
+
+    # 最大连通域锁定紫色主发 + 粉紫刘海渐变发梢，避免误保护眼珠高光蓝点
+    hair_cand = ((b > 135) & ((b - g) > 13) & (r < 224) & ((b - r) > -8)).astype(np.uint8)
+    num_h, h_lbls, h_stats, _ = cv2.connectedComponentsWithStats(hair_cand, connectivity=8)
+    best_h = 1 + int(np.argmax(h_stats[1:, cv2.CC_STAT_AREA])) if num_h > 1 else 0
+    hair_main = h_lbls == best_h
+    dist_h = cv2.distanceTransform(1 - hair_main.astype(np.uint8), cv2.DIST_L2, 3)
+    hair_keep = hair_main | ((dist_h <= 1.4) & (b > r + 2) & (g < 165))
+
+    y_nose = int(eyes_boxes[0][1] + 8)
+    nose_skin = np.median(rgb[y_nose - 3 : y_nose + 4, 173:181, :], axis=(0, 1)).astype(np.float32)
+    top_skin = np.clip(nose_skin - np.array([4.0, 10.0, 10.0], dtype=np.float32), 0, 255)
+    clean_rgb = rgb.copy()
+    lash_color = np.array([74, 42, 56], dtype=np.float32)
+
+    for idx_e, ((cx, cy, rx, ry_top, ry_bot), (ecx, ecy)) in enumerate(zip(eyes_boxes, eat_centers)):
+        outer_temple = (xx < cx - rx + 4) if idx_e == 0 else (xx > cx + rx - 4)
+        hk_eye = hair_keep | (outer_temple & (b >= r - 3) & (g < 165))
+        ry_map = np.where(yy < cy, float(ry_top), float(ry_bot))
+        in_e = (((xx - cx) / float(rx)) ** 2 + ((yy - cy) / ry_map) ** 2 <= 1.0) & (~hk_eye)
+        # 仅保留真正纯净外围脸颊亮肤，其余眼眶内部像素全面擦成鼻梁渐变肤色（彻底清除下睫毛/浅边残点）
+        is_outer_cheek = (r >= 242) & (g >= 208) & (b >= 200) & ((r - b) >= 14) & ((r - b) <= 38) & (yy >= cy + ry_bot - 5)
+        erase = (in_e & (~is_outer_cheek)).astype(np.uint8) * 255
+        erase = cv2.dilate(erase, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=1)
+        erase[~in_e] = 0
+        erase[hk_eye] = 0
+
+        m_soft = cv2.GaussianBlur(erase.astype(np.float32) / 255.0, (5, 5), 1.0)[:, :, None]
+        m_soft[hk_eye] = 0.0
+        t_y = np.clip((yy.astype(np.float32) - (cy - ry_top)) / float(ry_top + ry_bot), 0.0, 1.0)[:, :, None]
+        skin_grad = top_skin[None, None, :] * (1.0 - t_y) + nose_skin[None, None, :] * t_y
+        clean_rgb = (skin_grad * m_soft + clean_rgb.astype(np.float32) * (1.0 - m_soft)).astype(np.uint8)
+
+        patch_rgb, lash_a_final, pw, ph = extract_clean_eat_lash(eat_rgba, ecx, ecy)
+        for dy_i in range(-ph, ph + 1):
+            for dx_i in range(-pw, pw + 1):
+                tx, ty = int(cx + dx_i), int(cy + dy_i + 2)
+                if not (0 <= tx < 384 and 0 <= ty < 384):
+                    continue
+                if hk_eye[ty, tx]:
+                    continue
+                a_v = float(lash_a_final[dy_i + ph, dx_i + pw])
+                if a_v > 0.04:
+                    raw_c = patch_rgb[dy_i + ph, dx_i + pw].astype(np.float32)
+                    c_src = raw_c if (raw_c[1] < 155 and raw_c[2] < 160) else lash_color
+                    clean_rgb[ty, tx] = (c_src * a_v + clean_rgb[ty, tx].astype(np.float32) * (1.0 - a_v)).astype(np.uint8)
+
+    out[:, :, :3] = clean_rgb
+    return Image.fromarray(out, mode="RGBA")
+
+
+def save_blink_sprites_check(pairs: list[tuple[Image.Image, Image.Image]], out_path: str):
+    """生成睁眼与无痕闭眼精灵面部放大对比验收图。"""
+    crops = []
+    for base_img, blink_img in pairs:
+        for img in (base_img, blink_img):
+            crops.append(img.crop((95, 60, 275, 215)).resize((180, 155), Image.Resampling.NEAREST))
+    canvas = Image.new("RGB", (180 * len(crops), 155), (248, 249, 255))
+    for idx, c_img in enumerate(crops):
+        canvas.paste(c_img, (idx * 180, 0), c_img)
+    canvas.save(out_path)
+
+
 def make_checkerboard_preview(sprites: dict[str, Image.Image], out_path: str):
     """生成 2 行 × 5 列棋盘格透明抠图验收预览图。"""
     cell = 240
@@ -468,20 +570,64 @@ def main():
         sprites[name] = sprite
         print(f"Prepared sprite: {out_png}")
 
+    typing_body_img: Image.Image | None = None
     if "sit" in sprites:
-        arm_left, arm_right, sleeves_top, typing_body = extract_sit_arms(sprites["sit"])
+        arm_left, arm_right, sleeves_top, typing_body_img = extract_sit_arms(sprites["sit"])
         for arm_name, arm_img in (
             ("arm_left", arm_left),
             ("arm_right", arm_right),
             ("sleeves_top", sleeves_top),
-            ("typing_body", typing_body),
+            ("typing_body", typing_body_img),
         ):
             out_p = os.path.join(SPRITE_DIR, f"{arm_name}.png")
             arm_img.save(out_p)
             print(f"Prepared sprite: {out_p}")
         arms_check_path = os.path.join(BRAIN_DIR, "arms_cutout_check.png")
-        save_arms_cutout_check(arm_left, arm_right, sleeves_top, typing_body, arms_check_path)
+        save_arms_cutout_check(arm_left, arm_right, sleeves_top, typing_body_img, arms_check_path)
         print(f"Arms cutout check saved: {arms_check_path}")
+
+    if "eat" in sprites:
+        eat_img = sprites["eat"]
+        eat_centers = [(145, 147), (206, 148)]
+        blink_map: dict[str, Image.Image] = {}
+        if "idle" in sprites:
+            blink_map["idle_blink"] = build_clean_blink_sprite(
+                sprites["idle"], eat_img, [(147, 145, 23, 19, 19), (205, 147, 23, 20, 19)], eat_centers
+            )
+        if "sit" in sprites:
+            sit_blink = build_clean_blink_sprite(
+                sprites["sit"], eat_img, [(141, 157, 24, 20, 20), (207, 159, 24, 21, 20)], eat_centers
+            )
+            blink_map["sit_blink"] = sit_blink
+            if typing_body_img is not None:
+                tb_arr = np.array(typing_body_img, dtype=np.uint8)
+                sb_arr = np.array(sit_blink, dtype=np.uint8)
+                tb_arr[:205] = sb_arr[:205]
+                blink_map["typing_body_blink"] = Image.fromarray(tb_arr, mode="RGBA")
+        if "walk_a" in sprites:
+            wa_blink = build_clean_blink_sprite(
+                sprites["walk_a"], eat_img, [(145, 145, 23, 19, 19), (204, 147, 23, 20, 19)], eat_centers
+            )
+            blink_map["walk_a_blink"] = wa_blink
+            if "walk_b" in sprites:
+                wb_arr = np.array(sprites["walk_b"], dtype=np.uint8)
+                wab_arr = np.array(wa_blink, dtype=np.uint8)
+                wb_arr[:205] = wab_arr[:205]
+                blink_map["walk_b_blink"] = Image.fromarray(wb_arr, mode="RGBA")
+
+        for b_name, b_img in blink_map.items():
+            out_bp = os.path.join(SPRITE_DIR, f"{b_name}.png")
+            b_img.save(out_bp)
+            print(f"Prepared blink sprite: {out_bp}")
+
+        blink_pairs = []
+        for k_base, k_blink in (("idle", "idle_blink"), ("sit", "sit_blink"), ("walk_a", "walk_a_blink")):
+            if k_base in sprites and k_blink in blink_map:
+                blink_pairs.append((sprites[k_base], blink_map[k_blink]))
+        if blink_pairs:
+            blink_check_path = os.path.join(BRAIN_DIR, "live2d_blink_sprites_check.png")
+            save_blink_sprites_check(blink_pairs, blink_check_path)
+            print(f"Blink sprites check saved: {blink_check_path}")
 
     preview_path = os.path.join(PROJ_DIR, "assets", "sprites_preview.png")
     make_checkerboard_preview(sprites, preview_path)
