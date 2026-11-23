@@ -23,6 +23,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QRadialGradient,
+    QTransform,
 )
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
@@ -58,6 +59,7 @@ SPRITE_NAMES = (
     "sit",
     "eat",
     "shy",
+    "typing_body",
 )
 
 SPRITE_FALLBACKS = {
@@ -66,6 +68,7 @@ SPRITE_FALLBACKS = {
     "sit": "idle",
     "eat": "happy",
     "shy": "happy",
+    "typing_body": "sit",
 }
 
 
@@ -246,18 +249,21 @@ class StarryCatgirlPet(QWidget):
         self.laser_mode = False
         self.always_on_top = self.cfg.always_on_top
 
-        # 同步模仿打字状态与弹性通道
+        # 同步模仿打字状态与弹性通道（0.0=高高举起, 0.45=待命微悬, 1.0=重拍键帽）
         self.typing_idle_timer = 0.0
         self.typing_session_keys = 0
         self.typing_bubble_cooldown = 0.0
         self.sleep_wake_taps: list[float] = []
         self.recent_type_times: list[float] = []
         self.typing_hand = "left"
+        self.typing_pose = "ready"  # "ready" | "left_down" | "right_down" | "both_down"
+        self.typing_pose_hold = 0.0
         self.last_lit_zone = ""
         self.key_lit_timer = 0.0
-        self.left_paw_press = SpringValue(0.0, 0.0, stiffness=320.0, damping=20.0)
-        self.right_paw_press = SpringValue(0.0, 0.0, stiffness=320.0, damping=20.0)
+        self.left_paw_press = SpringValue(0.45, 0.45, stiffness=280.0, damping=18.0)
+        self.right_paw_press = SpringValue(0.45, 0.45, stiffness=280.0, damping=18.0)
         self.keyboard_pop = SpringValue(0.0, 0.0, stiffness=210.0, damping=18.0)
+        self.kb_shake = SpringValue(0.0, 0.0, stiffness=420.0, damping=22.0)
 
         self.pos_x = 0.0
         self.pos_y = 0.0
@@ -587,8 +593,8 @@ class StarryCatgirlPet(QWidget):
         if self.state == "flip":
             return "happy"
         if self.state == "typing":
-            # 固定稳固坐姿，配合实时弹出星辰小键盘与左右爪拍打，绝不闪跳
-            return "sit"
+            # 使用专门抹除原双手的坐姿底图，由程序从肩膀接出连续双臂，避免四只手
+            return "typing_body"
         if self.state == "walk":
             # 锁相双步态：仅在 walk_a 与 walk_b 之间交替迈步，避免夹入 idle 引起手部闪跳
             return ("walk_a", "walk_b")[int(self._walk_stride_phase()) % 2]
@@ -606,7 +612,7 @@ class StarryCatgirlPet(QWidget):
         # 若小键盘正在弹出，点击小键盘所在矩形也直接命中
         if self.keyboard_pop.value > 0.2:
             kb_cx = sprite_left + self.pet_size * 0.5
-            kb_cy = sprite_top + self.pet_size * 0.85
+            kb_cy = sprite_top + self.pet_size * 0.810
             kb_rect = QRectF(
                 kb_cx - self.pet_size * 0.34,
                 kb_cy - self.pet_size * 0.14,
@@ -1317,9 +1323,11 @@ class StarryCatgirlPet(QWidget):
         keys = self.typing_session_keys
         self.typing_session_keys = 0
         self.typing_idle_timer = 0.0
+        self.typing_pose = "ready"
+        self.typing_pose_hold = 0.0
         self.recent_type_times.clear()
-        self.left_paw_press.target = 0.0
-        self.right_paw_press.target = 0.0
+        self.left_paw_press.target = 0.45
+        self.right_paw_press.target = 0.45
         self.keyboard_pop.target = 0.0
 
         if not quiet and keys >= 30:
@@ -1393,34 +1401,46 @@ class StarryCatgirlPet(QWidget):
                 self.sound.play("pet")
                 self.say(random.choice(self.LINES["typing_start"]), 3400)
 
-        # 左右萌爪交替拍键 + 键盘区亮点反馈
+        # 左右萌爪强烈反差交替拍键（一高举、一拍键并保持 0.42s）
         if hand == "left":
+            if self.typing_pose == "left_down":
+                # 同手连续敲击时先瞬时微抬，再清晰拍下
+                self.left_paw_press.value = 0.52
             self.typing_hand = "left"
+            self.typing_pose = "left_down"
+            self.typing_pose_hold = 0.42
             self.last_lit_zone = "left"
-            self.left_paw_press.snap(1.0)
-            self.left_paw_press.target = 0.0
+            self.left_paw_press.target = 1.0
             self.right_paw_press.target = 0.0
-            self.rig.impulse_tilt(-12.0)
-            self.rig.impulse_squash(0.04)
+            self.rig.impulse_tilt(-15.0)
+            self.rig.impulse_squash(0.05)
+            self.kb_shake.impulse(28.0)
         elif hand == "right":
+            if self.typing_pose == "right_down":
+                self.right_paw_press.value = 0.52
             self.typing_hand = "right"
+            self.typing_pose = "right_down"
+            self.typing_pose_hold = 0.42
             self.last_lit_zone = "right"
-            self.right_paw_press.snap(1.0)
-            self.right_paw_press.target = 0.0
+            self.right_paw_press.target = 1.0
             self.left_paw_press.target = 0.0
-            self.rig.impulse_tilt(12.0)
-            self.rig.impulse_squash(0.04)
-        else:  # both（Space / Enter 双手齐拍）
+            self.rig.impulse_tilt(15.0)
+            self.rig.impulse_squash(0.05)
+            self.kb_shake.impulse(28.0)
+        else:  # both（Space / Enter 双爪齐重拍）
             self.typing_hand = "right" if self.typing_hand == "left" else "left"
+            self.typing_pose = "both_down"
+            self.typing_pose_hold = 0.36
             self.last_lit_zone = "space"
-            self.left_paw_press.snap(1.0)
-            self.left_paw_press.target = 0.0
-            self.right_paw_press.snap(1.0)
-            self.right_paw_press.target = 0.0
-            self.rig.impulse_squash(0.085)
+            self.left_paw_press.value = 0.45
+            self.left_paw_press.target = 1.0
+            self.right_paw_press.value = 0.45
+            self.right_paw_press.target = 1.0
+            self.rig.impulse_squash(0.10)
+            self.kb_shake.impulse(45.0)
             self.spawn_burst("star", 3)
 
-        self.key_lit_timer = 0.18
+        self.key_lit_timer = 0.22
         if is_fast or random.random() < 0.55:
             self._spawn_code_particle()
         if is_fast and random.random() < 0.45:
@@ -1483,14 +1503,21 @@ class StarryCatgirlPet(QWidget):
         if self.laser_pounce_cooldown > 0.0:
             self.laser_pounce_cooldown = max(0.0, self.laser_pounce_cooldown - dt)
 
-        # 更新星辰小键盘弹出与左右萌爪弹簧
+        # 更新星辰小键盘弹出、受击震动与左右萌爪弹簧
         self.keyboard_pop.target = 1.0 if (self.state == "typing" and not self.dragging) else 0.0
         self.keyboard_pop.step(dt)
+        self.kb_shake.step(dt)
         self.left_paw_press.step(dt)
         self.right_paw_press.step(dt)
 
-        # 停止敲键盘 2.8 秒后自动收起小键盘并连贯收尾
+        # 保持一高举一拍键反差；超时归回待命微悬，2.8秒无按键收起键盘
         if self.state == "typing" and not self.dragging:
+            if self.typing_pose != "ready":
+                self.typing_pose_hold -= dt
+                if self.typing_pose_hold <= 0.0:
+                    self.typing_pose = "ready"
+                    self.left_paw_press.target = 0.45
+                    self.right_paw_press.target = 0.45
             self.typing_idle_timer += dt
             if self.typing_idle_timer >= 2.8:
                 self._finish_typing_session(quiet=False)
@@ -1896,16 +1923,24 @@ class StarryCatgirlPet(QWidget):
             now = time.perf_counter()
             self.recent_type_times = [t for t in self.recent_type_times if now - t < 1.5]
             fast = len(self.recent_type_times) >= 10
-            if fast:
-                # 高速码字狂热律动：前倾微抖
-                tx = math.sin(self.anim_time * 32.0) * 1.8
-                ty = abs(math.sin(self.anim_time * 18.0)) * -3.5
-                tsx, tsy = 1.03, 0.97
-                tangle = math.sin(self.anim_time * 16.0) * 2.6
+            if self.typing_pose == "left_down":
+                tangle = -5.0
+                ty = 2.0
+            elif self.typing_pose == "right_down":
+                tangle = 5.0
+                ty = 2.0
+            elif self.typing_pose == "both_down":
+                tsx, tsy, ty = 1.06, 0.94, 4.0
             else:
                 breath = math.sin(self.anim_time * 3.8)
                 tsx = 1.0 + breath * 0.014
                 tsy = 1.0 - breath * 0.016
+
+            if fast:
+                # 高速码字狂热律动：叠加前倾微振
+                tx += math.sin(self.anim_time * 32.0) * 1.6
+                ty += abs(math.sin(self.anim_time * 18.0)) * -3.0
+                tangle += math.sin(self.anim_time * 16.0) * 2.4
         elif self.state == "eat":
             chew = math.sin(self.anim_time * 11.5)
             tsy = 1.0 + chew * 0.028
@@ -2004,10 +2039,13 @@ class StarryCatgirlPet(QWidget):
         draw_y = -(pivot_y - self.margin)
         target_rect = QRectF(draw_x, draw_y, self.pet_size, self.pet_size)
 
+        pet_transform = QTransform()
+        pet_transform.translate(cx + dx, pivot_y + dy)
+        pet_transform.rotate(angle)
+        pet_transform.scale(sx * flip_x, sy)
+
         painter.save()
-        painter.translate(cx + dx, pivot_y + dy)
-        painter.rotate(angle)
-        painter.scale(sx * flip_x, sy)
+        painter.setTransform(pet_transform, combine=True)
 
         if self.crossfade_progress < 1.0 and self.prev_sprite_key != self.active_sprite_key:
             prev_pm = self.sprites[self.prev_sprite_key]
@@ -2030,9 +2068,21 @@ class StarryCatgirlPet(QWidget):
             painter.drawPixmap(target_rect, curr_pm, QRectF(curr_pm.rect()))
         painter.restore()
 
-        # 3b. 绘制弹出式星辰迷你小键盘与左右萌爪实时拍击动画
+        # 3b. 绘制弹出式星辰迷你小键盘与从猫猫左右肩膀接出的连贯双臂拍打动画
         if self.keyboard_pop.value > 0.03:
-            self._draw_starry_keyboard(painter, cx + dx, self.margin + self.pet_size * 0.85 + dy)
+            l_shoulder = pet_transform.map(
+                QPointF(draw_x + self.pet_size * 0.375, draw_y + self.pet_size * 0.642)
+            )
+            r_shoulder = pet_transform.map(
+                QPointF(draw_x + self.pet_size * 0.625, draw_y + self.pet_size * 0.642)
+            )
+            self._draw_starry_keyboard_and_arms(
+                painter,
+                cx + dx,
+                self.margin + self.pet_size * 0.810 + dy + self.kb_shake.value,
+                l_shoulder,
+                r_shoulder,
+            )
 
         # 4. 绘制飞行中的可爱小鱼干
         for fish in self.flying_fishes:
@@ -2078,24 +2128,34 @@ class StarryCatgirlPet(QWidget):
                 painter.drawText(QPointF(-10, 0), p.text)
             painter.restore()
 
-    def _draw_starry_keyboard(self, painter: QPainter, center_x: float, center_y: float):
-        """在坐姿猫猫身前绘制带粗深蓝描边的星辰迷你小键盘与左右软萌爪爪拍击动画。"""
+    def _draw_starry_keyboard_and_arms(
+        self,
+        painter: QPainter,
+        center_x: float,
+        center_y: float,
+        l_shoulder: QPointF,
+        r_shoulder: QPointF,
+    ):
+        """绘制身前弹出的星辰迷你小键盘，以及从左右肩膀连续接出的 Bongo Cat 交替打字双臂。"""
         pop = max(0.0, self.keyboard_pop.value)
         alpha = max(0.0, min(1.0, pop * 1.35))
         scale = 0.45 + 0.55 * pop
         y_slide = (1.0 - min(1.2, pop)) * 14.0
 
-        kb_w = self.pet_size * 0.60
-        kb_h = self.pet_size * 0.21
+        kb_w = self.pet_size * 0.62
+        kb_h = self.pet_size * 0.22
         outline_col = QColor(42, 45, 96)
+        kb_cx = center_x
+        kb_cy = center_y + y_slide
 
+        # 1. 先绘制星辰迷你小键盘（居于身前，支持弹出缩放与按压亮点）
         painter.save()
         painter.setOpacity(alpha)
-        painter.translate(center_x, center_y + y_slide)
+        painter.translate(kb_cx, kb_cy)
         painter.scale(scale, scale)
 
         # 键盘底影
-        painter.setBrush(QColor(42, 45, 96, 36))
+        painter.setBrush(QColor(42, 45, 96, 38))
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(QRectF(-kb_w * 0.51, -kb_h * 0.42 + 3.0, kb_w * 1.02, kb_h), 9, 9)
 
@@ -2131,7 +2191,7 @@ class StarryCatgirlPet(QWidget):
 
         # 键帽布局与实时星光高亮
         lit_active = self.key_lit_timer > 0.0
-        glow_ratio = max(0.0, min(1.0, self.key_lit_timer / 0.18))
+        glow_ratio = max(0.0, min(1.0, self.key_lit_timer / 0.22))
 
         rows = 2
         cols = 8
@@ -2147,9 +2207,9 @@ class StarryCatgirlPet(QWidget):
                 zone = "left" if c < 4 else "right"
                 is_lit = lit_active and (self.last_lit_zone == zone)
                 kx = gx0 + c * (kw + 2.5)
-                ky = gy0 + r * (kh + 2.5) + (1.3 * glow_ratio if is_lit else 0.0)
+                ky = gy0 + r * (kh + 2.5) + (1.8 * glow_ratio if is_lit else 0.0)
                 if is_lit:
-                    fill = QColor(255, 210, 145) if zone == "left" else QColor(150, 230, 255)
+                    fill = QColor(255, 205, 118) if zone == "left" else QColor(135, 225, 255)
                 else:
                     fill = QColor(253, 252, 255) if (r + c) % 2 == 0 else QColor(240, 236, 255)
                 painter.setBrush(fill)
@@ -2157,10 +2217,11 @@ class StarryCatgirlPet(QWidget):
                 painter.drawRoundedRect(QRectF(kx, ky, kw, kh), 2.2, 2.2)
 
         # 底部长空格键与左右功能键
-        sp_y = gy0 + grid_h + 2.8 + (1.4 * glow_ratio if (lit_active and self.last_lit_zone == "space") else 0.0)
+        sp_lit = lit_active and (self.last_lit_zone == "space")
+        sp_y = gy0 + grid_h + 2.8 + (1.8 * glow_ratio if sp_lit else 0.0)
         sp_h = max(4.5, kb_h * 0.21)
         sp_w = kb_w * 0.46
-        sp_fill = QColor(255, 195, 232) if (lit_active and self.last_lit_zone == "space") else QColor(253, 250, 255)
+        sp_fill = QColor(255, 178, 226) if sp_lit else QColor(253, 250, 255)
         painter.setBrush(sp_fill)
         painter.setPen(QPen(outline_col, 1.25))
         painter.drawRoundedRect(QRectF(-sp_w * 0.5, sp_y, sp_w, sp_h), 2.5, 2.5)
@@ -2170,67 +2231,117 @@ class StarryCatgirlPet(QWidget):
         painter.drawRoundedRect(QRectF(-sp_w * 0.5 - side_w - 3, sp_y, side_w, sp_h), 2.2, 2.2)
         painter.drawRoundedRect(QRectF(sp_w * 0.5 + 3, sp_y, side_w, sp_h), 2.2, 2.2)
 
-        # 绘制左右软萌小手/爪爪交替拍击键盘
-        self._draw_typing_paw(
+        painter.restore()
+
+        # 2. 在世界坐标系中绘制从左右真实肩膀连贯伸出的双臂与小手掌（随 keyboard_pop 同步显现）
+        painter.save()
+        painter.setOpacity(alpha)
+
+        kb_top_y = kb_cy + (y_top * scale)
+        kb_scaled_w = kb_w * scale
+        kb_scaled_h = kb_h * scale
+
+        self._draw_connected_arm(
             painter,
-            -kb_w * 0.23,
-            y_top + 1.5,
-            self.left_paw_press.value,
+            shoulder=l_shoulder,
+            kb_cx=kb_cx,
+            kb_top_y=kb_top_y,
+            kb_w=kb_scaled_w,
+            kb_h=kb_scaled_h,
+            press=self.left_paw_press.value,
             is_left=True,
             lit=(lit_active and self.last_lit_zone in ("left", "space")),
+            hit_space=(self.typing_pose == "both_down"),
         )
-        self._draw_typing_paw(
+        self._draw_connected_arm(
             painter,
-            kb_w * 0.23,
-            y_top + 1.5,
-            self.right_paw_press.value,
+            shoulder=r_shoulder,
+            kb_cx=kb_cx,
+            kb_top_y=kb_top_y,
+            kb_w=kb_scaled_w,
+            kb_h=kb_scaled_h,
+            press=self.right_paw_press.value,
             is_left=False,
             lit=(lit_active and self.last_lit_zone in ("right", "space")),
+            hit_space=(self.typing_pose == "both_down"),
         )
 
         painter.restore()
 
-    @staticmethod
-    def _draw_typing_paw(
+    def _draw_connected_arm(
+        self,
         painter: QPainter,
-        x: float,
-        base_y: float,
+        shoulder: QPointF,
+        kb_cx: float,
+        kb_top_y: float,
+        kb_w: float,
+        kb_h: float,
         press: float,
         is_left: bool,
         lit: bool,
+        hit_space: bool,
     ):
-        """绘制带深蓝金边袖口的软萌 Q 版小手，随弹簧按压值上下拍打键帽。"""
-        p = max(-0.2, min(1.2, press))
-        # press=0 抬起在上方准备，press=1 拍下触键
-        py = base_y - 9.0 + p * 12.5
-        sx = 1.0 + max(0.0, p) * 0.08
-        sy = 1.0 - max(0.0, p) * 0.08
+        """从猫猫真实肩膀节点出发，用双层粗描边贝塞尔曲线画出与衣服袖口无缝衔接的连贯小手臂。"""
+        p = max(-0.15, min(1.15, press))
+        sign = -1.0 if is_left else 1.0
         outline_col = QColor(42, 45, 96)
 
-        if lit and p > 0.35:
-            ring_r = 7.0 + (1.0 - p) * 8.0
-            ring_col = QColor(255, 190, 225, int(190 * p)) if is_left else QColor(145, 225, 255, int(190 * p))
+        # 手掌高举点 (p=0.0) 到实打实拍在键帽内 (p=1.0) 的紧凑 Q 版轨迹
+        rest_x = kb_cx + sign * (kb_w * (0.16 if hit_space else 0.23))
+        raised_x = kb_cx + sign * (kb_w * 0.33)
+        hand_x = raised_x + (rest_x - raised_x) * p
+
+        raised_y = kb_top_y - self.pet_size * 0.115
+        down_y = kb_top_y + kb_h * (0.62 if hit_space else 0.36)
+        hand_y = raised_y + (down_y - raised_y) * p
+
+        # 自然向外略微弯出的手肘控制点
+        elbow_x = (shoulder.x() + hand_x) * 0.5 + sign * (self.pet_size * (0.075 - 0.020 * p))
+        elbow_y = (shoulder.y() + hand_y) * 0.5 + self.pet_size * 0.018
+
+        arm_path = QPainterPath()
+        arm_path.moveTo(shoulder)
+        arm_path.quadTo(QPointF(elbow_x, elbow_y), QPointF(hand_x, hand_y))
+
+        # 1. 若刚拍在键盘上，先画键帽接触处的星芒冲击圈
+        if lit and p > 0.60:
+            ring_r = (8.0 + (1.0 - p) * 14.0) * (self.pet_size / 180.0)
+            ring_col = QColor(255, 195, 115, int(210 * p)) if is_left else QColor(125, 225, 255, int(210 * p))
             painter.setBrush(Qt.NoBrush)
-            painter.setPen(QPen(ring_col, 1.8))
-            painter.drawEllipse(QPointF(x, base_y + 4.0), ring_r, ring_r * 0.55)
+            painter.setPen(QPen(ring_col, 2.2))
+            painter.drawEllipse(QPointF(hand_x, hand_y + 2.0), ring_r, ring_r * 0.55)
+
+        # 2. 外层深蓝粗描边 + 内层暖粉肤色填充，形成从袖口顺滑伸出的 Q 版软萌短胳膊
+        outer_w = max(7.5, self.pet_size * 0.082)
+        inner_w = max(5.2, self.pet_size * 0.056)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(outline_col, outer_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(arm_path)
+        painter.setPen(QPen(QColor(255, 232, 226), inner_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(arm_path)
+
+        # 3. 沿末端切线方向画深蓝金边手腕圈与圆润小手掌
+        tx = hand_x - elbow_x
+        ty = hand_y - elbow_y
+        wrist_ang = math.degrees(math.atan2(ty, tx)) - 90.0
+        scale_r = self.pet_size / 180.0
 
         painter.save()
-        painter.translate(x, py)
-        painter.rotate(-8.0 if is_left else 8.0)
-        painter.scale(sx, sy)
+        painter.translate(hand_x, hand_y)
+        painter.rotate(wrist_ang * 0.45)
+        painter.scale(scale_r * (1.0 + max(0.0, p - 0.5) * 0.14), scale_r * (1.0 - max(0.0, p - 0.5) * 0.10))
 
-        # 深蓝星辰袖口（带金色边线，呼应猫猫服饰）
+        # 精致深蓝金边护腕袖口
         painter.setBrush(QColor(52, 54, 108))
         painter.setPen(QPen(outline_col, 2.0))
-        painter.drawRoundedRect(QRectF(-7.5, -10.5, 15.0, 9.0), 4.0, 4.0)
-        painter.setPen(QPen(QColor(238, 205, 128), 1.4))
-        painter.drawLine(QPointF(-6.0, -3.0), QPointF(6.0, -3.0))
+        painter.drawRoundedRect(QRectF(-6.4, -7.8, 12.8, 5.8), 3.0, 3.0)
+        painter.setPen(QPen(QColor(238, 205, 128), 1.3))
+        painter.drawLine(QPointF(-4.8, -3.0), QPointF(4.8, -3.0))
 
-        # 粉嫩圆润小手掌
+        # 圆润可爱小手掌
         painter.setBrush(QColor(255, 232, 226))
         painter.setPen(QPen(outline_col, 2.0))
-        painter.drawEllipse(QPointF(0.0, 2.5), 7.2, 6.2)
-
+        painter.drawEllipse(QPointF(0.0, 1.5), 6.5, 5.5)
         painter.restore()
 
     @staticmethod

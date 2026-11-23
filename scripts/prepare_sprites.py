@@ -189,6 +189,47 @@ def extract_transparent_sprite(
     return canvas
 
 
+def make_typing_body_from_sit(sit_rgba: Image.Image) -> Image.Image:
+    """
+    基于已抠图的 sit.png，抹除左右两侧原本伸出的两只小手掌与护腕边，
+    并用周围紫蓝长发与深蓝裙摆颜色自然修补，作为无原手臂的纯正打字专用底图。
+    """
+    rgba = np.array(sit_rgba, dtype=np.uint8)
+    rgb = rgba[:, :, :3].copy()
+    alpha = rgba[:, :, 3]
+    h, w = alpha.shape
+
+    r = rgb[:, :, 0].astype(np.int16)
+    g = rgb[:, :, 1].astype(np.int16)
+    b = rgb[:, :, 2].astype(np.int16)
+
+    # 定位原 sit.png 左右伸出的两只手掌肤色区域（严格避开面部、胸口锁骨与下方白袜双腿）
+    skin_like = (alpha > 120) & (r > 190) & (g > 145) & (b > 130) & ((r - b) > 10)
+    roi = np.zeros((h, w), dtype=np.uint8)
+    # 左侧原小手：x in [95..148], y in [252..306]
+    roi[252:306, 95:148] = 1
+    # 右侧原小手：x in [224..272], y in [252..306]
+    roi[252:306, 224:272] = 1
+
+    target_hands = (skin_like & (roi == 1)).astype(np.uint8)
+    # 适度向外扩张 6px 以同步覆盖手掌外围深蓝描边与金边小护腕
+    dil_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
+    erase_mask = (cv2.dilate(target_hands, dil_k, iterations=1) & roi) * 255
+    erase_mask[alpha <= 30] = 0
+
+    # 将透明背景临时设为深紫发色，防止 inpaint 从透明黑像素吸取脏色
+    rgb_for_inpaint = rgb.copy()
+    rgb_for_inpaint[alpha <= 30] = (122, 122, 222)
+    bgr = cv2.cvtColor(rgb_for_inpaint, cv2.COLOR_RGB2BGR)
+    inpainted_bgr = cv2.inpaint(bgr, erase_mask, inpaintRadius=7, flags=cv2.INPAINT_TELEA)
+    inpainted_rgb = cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
+
+    # 仅替换擦除掩码内的像素，保留原本完整的透明 Alpha 与外轮廓
+    out_rgb = np.where(erase_mask[:, :, None] > 0, inpainted_rgb, rgb)
+    out_rgba = np.dstack([out_rgb, alpha])
+    return Image.fromarray(out_rgba, mode="RGBA")
+
+
 def make_checkerboard_preview(sprites: dict[str, Image.Image], out_path: str):
     """生成 2 行 × 5 列棋盘格透明抠图验收预览图。"""
     cell = 240
@@ -244,6 +285,12 @@ def main():
         sprite.save(out_png)
         sprites[name] = sprite
         print(f"Prepared sprite: {out_png}")
+
+    if "sit" in sprites:
+        typing_body = make_typing_body_from_sit(sprites["sit"])
+        tb_path = os.path.join(SPRITE_DIR, "typing_body.png")
+        typing_body.save(tb_path)
+        print(f"Prepared sprite: {tb_path}")
 
     preview_path = os.path.join(PROJ_DIR, "assets", "sprites_preview.png")
     make_checkerboard_preview(sprites, preview_path)
