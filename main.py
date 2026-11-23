@@ -223,9 +223,10 @@ class StarryCatgirlPet(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
 
-        # 加载 10 套透明精灵图并生成 96x96 Alpha 采样网格
+        # 加载 11 套透明精灵图与原装拆件双臂
         self.sprites: dict[str, QPixmap] = {}
         self.hit_grids: dict[str, QImage] = {}
+        self.arm_sprites: dict[str, QPixmap] = {}
         self._load_sprites()
 
         # 基础视觉尺寸与窗口尺寸
@@ -367,6 +368,12 @@ class StarryCatgirlPet(QWidget):
                 .convertToFormat(QImage.Format_ARGB32)
             )
             self.hit_grids[name] = img
+
+        for arm_name in ("arm_left", "arm_right"):
+            arm_path = os.path.join(SPRITE_DIR, f"{arm_name}.png")
+            arm_pm = QPixmap(arm_path) if os.path.isfile(arm_path) else QPixmap()
+            if not arm_pm.isNull():
+                self.arm_sprites[arm_name] = arm_pm
 
     @staticmethod
     def _menu_stylesheet() -> str:
@@ -612,12 +619,12 @@ class StarryCatgirlPet(QWidget):
         # 若小键盘正在弹出，点击小键盘所在矩形也直接命中
         if self.keyboard_pop.value > 0.2:
             kb_cx = sprite_left + self.pet_size * 0.5
-            kb_cy = sprite_top + self.pet_size * 0.810
+            kb_cy = sprite_top + self.pet_size * 0.822
             kb_rect = QRectF(
-                kb_cx - self.pet_size * 0.34,
-                kb_cy - self.pet_size * 0.14,
-                self.pet_size * 0.68,
-                self.pet_size * 0.28,
+                kb_cx - self.pet_size * 0.32,
+                kb_cy - self.pet_size * 0.13,
+                self.pet_size * 0.64,
+                self.pet_size * 0.26,
             )
             if kb_rect.contains(QPointF(local_pt)):
                 return True
@@ -2068,20 +2075,14 @@ class StarryCatgirlPet(QWidget):
             painter.drawPixmap(target_rect, curr_pm, QRectF(curr_pm.rect()))
         painter.restore()
 
-        # 3b. 绘制弹出式星辰迷你小键盘与从猫猫左右肩膀接出的连贯双臂拍打动画
+        # 3b. 绘制弹出式星辰迷你小键盘与原装手绘双臂（Live2D 肩关节绑定旋转）
         if self.keyboard_pop.value > 0.03:
-            l_shoulder = pet_transform.map(
-                QPointF(draw_x + self.pet_size * 0.375, draw_y + self.pet_size * 0.642)
-            )
-            r_shoulder = pet_transform.map(
-                QPointF(draw_x + self.pet_size * 0.625, draw_y + self.pet_size * 0.642)
-            )
             self._draw_starry_keyboard_and_arms(
                 painter,
+                pet_transform,
+                target_rect,
                 cx + dx,
-                self.margin + self.pet_size * 0.810 + dy + self.kb_shake.value,
-                l_shoulder,
-                r_shoulder,
+                self.margin + self.pet_size * 0.822 + dy + self.kb_shake.value,
             )
 
         # 4. 绘制飞行中的可爱小鱼干
@@ -2131,24 +2132,24 @@ class StarryCatgirlPet(QWidget):
     def _draw_starry_keyboard_and_arms(
         self,
         painter: QPainter,
+        pet_transform: QTransform,
+        target_rect: QRectF,
         center_x: float,
         center_y: float,
-        l_shoulder: QPointF,
-        r_shoulder: QPointF,
     ):
-        """绘制身前弹出的星辰迷你小键盘，以及从左右肩膀连续接出的 Bongo Cat 交替打字双臂。"""
+        """绘制身前弹出的星辰迷你小键盘，并将 sit 原装手绘双臂绕真实肩关节旋转叠加拍打。"""
         pop = max(0.0, self.keyboard_pop.value)
         alpha = max(0.0, min(1.0, pop * 1.35))
         scale = 0.45 + 0.55 * pop
         y_slide = (1.0 - min(1.2, pop)) * 14.0
 
-        kb_w = self.pet_size * 0.62
-        kb_h = self.pet_size * 0.22
+        kb_w = self.pet_size * 0.56
+        kb_h = self.pet_size * 0.21
         outline_col = QColor(42, 45, 96)
         kb_cx = center_x
         kb_cy = center_y + y_slide
 
-        # 1. 先绘制星辰迷你小键盘（居于身前，支持弹出缩放与按压亮点）
+        # 1. 绘制星辰迷你小键盘（先画在原装手掌下方）
         painter.save()
         painter.setOpacity(alpha)
         painter.translate(kb_cx, kb_cy)
@@ -2180,13 +2181,13 @@ class StarryCatgirlPet(QWidget):
         kb_grad.setColorAt(0.0, QColor(232, 226, 255))
         kb_grad.setColorAt(1.0, QColor(178, 174, 240))
         painter.setBrush(kb_grad)
-        painter.setPen(QPen(outline_col, 2.3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setPen(QPen(outline_col, 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         painter.drawPath(body)
 
         # 右上角迷你金色四角星指示灯
         painter.save()
         painter.translate(top_half - 8, y_top + 6)
-        self._draw_star(painter, 3.8, QColor(255, 222, 105))
+        self._draw_star(painter, 3.6, QColor(255, 222, 105))
         painter.restore()
 
         # 键帽布局与实时星光高亮
@@ -2219,11 +2220,11 @@ class StarryCatgirlPet(QWidget):
         # 底部长空格键与左右功能键
         sp_lit = lit_active and (self.last_lit_zone == "space")
         sp_y = gy0 + grid_h + 2.8 + (1.8 * glow_ratio if sp_lit else 0.0)
-        sp_h = max(4.5, kb_h * 0.21)
+        sp_h = max(4.2, kb_h * 0.21)
         sp_w = kb_w * 0.46
         sp_fill = QColor(255, 178, 226) if sp_lit else QColor(253, 250, 255)
         painter.setBrush(sp_fill)
-        painter.setPen(QPen(outline_col, 1.25))
+        painter.setPen(QPen(outline_col, 1.2))
         painter.drawRoundedRect(QRectF(-sp_w * 0.5, sp_y, sp_w, sp_h), 2.5, 2.5)
 
         side_w = kb_w * 0.14
@@ -2231,118 +2232,59 @@ class StarryCatgirlPet(QWidget):
         painter.drawRoundedRect(QRectF(-sp_w * 0.5 - side_w - 3, sp_y, side_w, sp_h), 2.2, 2.2)
         painter.drawRoundedRect(QRectF(sp_w * 0.5 + 3, sp_y, side_w, sp_h), 2.2, 2.2)
 
-        painter.restore()
-
-        # 2. 在世界坐标系中绘制从左右真实肩膀连贯伸出的双臂与小手掌（随 keyboard_pop 同步显现）
-        painter.save()
-        painter.setOpacity(alpha)
-
-        kb_top_y = kb_cy + (y_top * scale)
+        # 拍击瞬间的键盘星芒冲击波
         kb_scaled_w = kb_w * scale
         kb_scaled_h = kb_h * scale
-
-        self._draw_connected_arm(
-            painter,
-            shoulder=l_shoulder,
-            kb_cx=kb_cx,
-            kb_top_y=kb_top_y,
-            kb_w=kb_scaled_w,
-            kb_h=kb_scaled_h,
-            press=self.left_paw_press.value,
-            is_left=True,
-            lit=(lit_active and self.last_lit_zone in ("left", "space")),
-            hit_space=(self.typing_pose == "both_down"),
-        )
-        self._draw_connected_arm(
-            painter,
-            shoulder=r_shoulder,
-            kb_cx=kb_cx,
-            kb_top_y=kb_top_y,
-            kb_w=kb_scaled_w,
-            kb_h=kb_scaled_h,
-            press=self.right_paw_press.value,
-            is_left=False,
-            lit=(lit_active and self.last_lit_zone in ("right", "space")),
-            hit_space=(self.typing_pose == "both_down"),
-        )
+        kb_top_y = y_top
+        if lit_active:
+            if self.last_lit_zone == "left" and self.left_paw_press.value > 0.65:
+                painter.setBrush(Qt.NoBrush)
+                painter.setPen(QPen(QColor(255, 195, 115, int(215 * glow_ratio)), 2.0))
+                painter.drawEllipse(QPointF(-kb_w * 0.22, kb_top_y + kb_h * 0.36), 11.0, 5.5)
+            elif self.last_lit_zone == "right" and self.right_paw_press.value > 0.65:
+                painter.setBrush(Qt.NoBrush)
+                painter.setPen(QPen(QColor(125, 225, 255, int(215 * glow_ratio)), 2.0))
+                painter.drawEllipse(QPointF(kb_w * 0.22, kb_top_y + kb_h * 0.36), 11.0, 5.5)
+            elif self.last_lit_zone == "space":
+                painter.setBrush(Qt.NoBrush)
+                painter.setPen(QPen(QColor(255, 175, 225, int(225 * glow_ratio)), 2.2))
+                painter.drawEllipse(QPointF(0.0, kb_top_y + kb_h * 0.65), 16.0, 6.5)
 
         painter.restore()
 
-    def _draw_connected_arm(
-        self,
-        painter: QPainter,
-        shoulder: QPointF,
-        kb_cx: float,
-        kb_top_y: float,
-        kb_w: float,
-        kb_h: float,
-        press: float,
-        is_left: bool,
-        lit: bool,
-        hit_space: bool,
-    ):
-        """从猫猫真实肩膀节点出发，用双层粗描边贝塞尔曲线画出与衣服袖口无缝衔接的连贯小手臂。"""
-        p = max(-0.15, min(1.15, press))
-        sign = -1.0 if is_left else 1.0
-        outline_col = QColor(42, 45, 96)
+        # 2. 直接使用与猫猫主体相同的 pet_transform 挂载原装手绘左右手臂（绕真肩枢轴旋转）
+        draw_x = target_rect.x()
+        draw_y = target_rect.y()
+        arm_blend = min(1.0, pop)
+        hit_space = self.typing_pose == "both_down"
 
-        # 手掌高举点 (p=0.0) 到实打实拍在键帽内 (p=1.0) 的紧凑 Q 版轨迹
-        rest_x = kb_cx + sign * (kb_w * (0.16 if hit_space else 0.23))
-        raised_x = kb_cx + sign * (kb_w * 0.33)
-        hand_x = raised_x + (rest_x - raised_x) * p
+        # 左臂：press=0.0 高举(+72°)，press=1.0 拍键(-34° / 空格 -46°)
+        p_l = max(-0.1, min(1.1, self.left_paw_press.value))
+        deg_l = (72.0 * (1.0 - p_l) + (-46.0 if hit_space else -34.0) * p_l) * arm_blend
+        scale_l = 1.0 + max(0.0, p_l - 0.5) * 0.14 * arm_blend
+        pivot_l = QPointF(draw_x + self.pet_size * 0.376, draw_y + self.pet_size * 0.656)
 
-        raised_y = kb_top_y - self.pet_size * 0.115
-        down_y = kb_top_y + kb_h * (0.62 if hit_space else 0.36)
-        hand_y = raised_y + (down_y - raised_y) * p
+        # 右臂：press=0.0 高举(-72°)，press=1.0 拍键(+26° / 空格 +40°)
+        p_r = max(-0.1, min(1.1, self.right_paw_press.value))
+        deg_r = (-72.0 * (1.0 - p_r) + (40.0 if hit_space else 26.0) * p_r) * arm_blend
+        scale_r = 1.0 + max(0.0, p_r - 0.5) * 0.14 * arm_blend
+        pivot_r = QPointF(draw_x + self.pet_size * 0.614, draw_y + self.pet_size * 0.656)
 
-        # 自然向外略微弯出的手肘控制点
-        elbow_x = (shoulder.x() + hand_x) * 0.5 + sign * (self.pet_size * (0.075 - 0.020 * p))
-        elbow_y = (shoulder.y() + hand_y) * 0.5 + self.pet_size * 0.018
-
-        arm_path = QPainterPath()
-        arm_path.moveTo(shoulder)
-        arm_path.quadTo(QPointF(elbow_x, elbow_y), QPointF(hand_x, hand_y))
-
-        # 1. 若刚拍在键盘上，先画键帽接触处的星芒冲击圈
-        if lit and p > 0.60:
-            ring_r = (8.0 + (1.0 - p) * 14.0) * (self.pet_size / 180.0)
-            ring_col = QColor(255, 195, 115, int(210 * p)) if is_left else QColor(125, 225, 255, int(210 * p))
-            painter.setBrush(Qt.NoBrush)
-            painter.setPen(QPen(ring_col, 2.2))
-            painter.drawEllipse(QPointF(hand_x, hand_y + 2.0), ring_r, ring_r * 0.55)
-
-        # 2. 外层深蓝粗描边 + 内层暖粉肤色填充，形成从袖口顺滑伸出的 Q 版软萌短胳膊
-        outer_w = max(7.5, self.pet_size * 0.082)
-        inner_w = max(5.2, self.pet_size * 0.056)
-        painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(outline_col, outer_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.drawPath(arm_path)
-        painter.setPen(QPen(QColor(255, 232, 226), inner_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.drawPath(arm_path)
-
-        # 3. 沿末端切线方向画深蓝金边手腕圈与圆润小手掌
-        tx = hand_x - elbow_x
-        ty = hand_y - elbow_y
-        wrist_ang = math.degrees(math.atan2(ty, tx)) - 90.0
-        scale_r = self.pet_size / 180.0
-
-        painter.save()
-        painter.translate(hand_x, hand_y)
-        painter.rotate(wrist_ang * 0.45)
-        painter.scale(scale_r * (1.0 + max(0.0, p - 0.5) * 0.14), scale_r * (1.0 - max(0.0, p - 0.5) * 0.10))
-
-        # 精致深蓝金边护腕袖口
-        painter.setBrush(QColor(52, 54, 108))
-        painter.setPen(QPen(outline_col, 2.0))
-        painter.drawRoundedRect(QRectF(-6.4, -7.8, 12.8, 5.8), 3.0, 3.0)
-        painter.setPen(QPen(QColor(238, 205, 128), 1.3))
-        painter.drawLine(QPointF(-4.8, -3.0), QPointF(4.8, -3.0))
-
-        # 圆润可爱小手掌
-        painter.setBrush(QColor(255, 232, 226))
-        painter.setPen(QPen(outline_col, 2.0))
-        painter.drawEllipse(QPointF(0.0, 1.5), 6.5, 5.5)
-        painter.restore()
+        for arm_key, pivot, deg, arm_sc in (
+            ("arm_left", pivot_l, deg_l, scale_l),
+            ("arm_right", pivot_r, deg_r, scale_r),
+        ):
+            arm_pm = self.arm_sprites.get(arm_key)
+            if arm_pm is None or arm_pm.isNull():
+                continue
+            painter.save()
+            painter.setTransform(pet_transform, combine=True)
+            painter.translate(pivot)
+            painter.rotate(deg)
+            painter.scale(1.0, arm_sc)
+            painter.translate(-pivot)
+            painter.drawPixmap(target_rect, arm_pm, QRectF(arm_pm.rect()))
+            painter.restore()
 
     @staticmethod
     def _draw_fish(painter: QPainter, x: float, y: float, angle_deg: float, scale: float):
