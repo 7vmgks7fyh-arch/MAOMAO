@@ -1,0 +1,17 @@
+# Python 虚拟环境与缓存
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 临时日志与暂存文件
+*.log
+*.tmp
+
+# 本地个人养成存档与位置配置
+data/
+
+# 原始生成大图与运行时自动合成的 WAV 音效（运行时会自动重新生成）
+assets/raw/
+assets/sounds/

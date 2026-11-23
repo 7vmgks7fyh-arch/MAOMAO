@@ -1,0 +1,7 @@
+﻿# 运行星辰猫猫桌宠仅需 PySide6（若需仅安装核心桌面组件以减小体积，也可使用 PySide6-Essentials）
+PySide6>=6.7.0
+
+# 注意：仅当你修改原始立绘并重新运行 scripts/prepare_sprites.py 抠图时，才需要额外安装：
+# Pillow
+# numpy
+# opencv-python
